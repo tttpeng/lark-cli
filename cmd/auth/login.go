@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -92,6 +93,21 @@ func completeDomain(toComplete string) []string {
 
 func authLoginRun(opts *LoginOptions) error {
 	f := opts.Factory
+
+	// External auth redirect: output the redirect URL and exit immediately.
+	// Used by Anya server to redirect auth login to its own H5 authorization page.
+	if redirectURL := os.Getenv("LARKSUITE_CLI_AUTH_REDIRECT_URL"); redirectURL != "" {
+		if opts.JSON {
+			b, _ := json.Marshal(map[string]interface{}{
+				"verification_url": redirectURL,
+				"hint":             "Open the URL in a browser to complete authorization. After authorization, the token will be available automatically.",
+			})
+			fmt.Fprintln(f.IOStreams.Out, string(b))
+		} else {
+			fmt.Fprintf(f.IOStreams.ErrOut, "在浏览器中打开以下链接进行认证:\n\n  %s\n\n", redirectURL)
+		}
+		return nil
+	}
 
 	config, err := f.Config()
 	if err != nil {
