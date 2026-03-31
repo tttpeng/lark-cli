@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -78,14 +79,20 @@ func (c *APIClient) DoSDKRequest(ctx context.Context, req *larkcore.ApiReq, as c
 		req.SupportedAccessTokenTypes = []larkcore.AccessTokenType{larkcore.AccessTokenTypeTenant}
 	} else {
 		req.SupportedAccessTokenTypes = []larkcore.AccessTokenType{larkcore.AccessTokenTypeUser}
-		if c.Config.UserOpenId == "" {
-			return nil, fmt.Errorf("login required: lark-cli auth login (or use --as bot)")
+		if envToken := os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN"); envToken != "" {
+			// External token injection (e.g. from Anya server) — caller manages token lifecycle.
+			opts = append(opts, larkcore.WithUserAccessToken(envToken))
+		} else {
+			// Standard keychain flow for human users.
+			if c.Config.UserOpenId == "" {
+				return nil, fmt.Errorf("login required: lark-cli auth login (or use --as bot)")
+			}
+			token, err := auth.GetValidAccessToken(c.HTTP, auth.NewUATCallOptions(c.Config, c.ErrOut))
+			if err != nil {
+				return nil, err
+			}
+			opts = append(opts, larkcore.WithUserAccessToken(token))
 		}
-		token, err := auth.GetValidAccessToken(c.HTTP, auth.NewUATCallOptions(c.Config, c.ErrOut))
-		if err != nil {
-			return nil, err
-		}
-		opts = append(opts, larkcore.WithUserAccessToken(token))
 	}
 
 	opts = append(opts, extraOpts...)
