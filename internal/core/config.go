@@ -129,10 +129,16 @@ func RequireConfig(kc keychain.KeychainAccess) (*CliConfig, error) {
 }
 
 // RequireAuth loads config and ensures a user is logged in.
+// When LARKSUITE_CLI_USER_ACCESS_TOKEN or LARKSUITE_CLI_USER_ACCESS_TOKEN_FILE is set,
+// the login check is skipped (external token injection — caller manages auth lifecycle).
 func RequireAuth(kc keychain.KeychainAccess) (*CliConfig, error) {
 	cfg, err := RequireConfig(kc)
 	if err != nil {
 		return nil, err
+	}
+	// External token injection: skip login check
+	if os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN") != "" || os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN_FILE") != "" {
+		return cfg, nil
 	}
 	if cfg.UserOpenId == "" {
 		return nil, &ConfigError{Code: 3, Type: "auth", Message: "not logged in", Hint: "run `lark-cli auth login` in the background. It blocks and outputs a verification URL — retrieve the URL and open it in a browser to complete login."}

@@ -80,8 +80,19 @@ func (c *APIClient) DoSDKRequest(ctx context.Context, req *larkcore.ApiReq, as c
 	} else {
 		req.SupportedAccessTokenTypes = []larkcore.AccessTokenType{larkcore.AccessTokenTypeUser}
 		if envToken := os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN"); envToken != "" {
-			// External token injection (e.g. from Anya server) — caller manages token lifecycle.
+			// External token injection via env var — caller manages token lifecycle.
 			opts = append(opts, larkcore.WithUserAccessToken(envToken))
+		} else if tokenFile := os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN_FILE"); tokenFile != "" {
+			// External token injection via file — caller writes token before each invocation.
+			fileBytes, err := os.ReadFile(tokenFile)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read token file %s: %v", tokenFile, err)
+			}
+			fileToken := strings.TrimSpace(string(fileBytes))
+			if fileToken == "" {
+				return nil, fmt.Errorf("token file %s is empty", tokenFile)
+			}
+			opts = append(opts, larkcore.WithUserAccessToken(fileToken))
 		} else {
 			// Standard keychain flow for human users.
 			if c.Config.UserOpenId == "" {
