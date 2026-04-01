@@ -84,16 +84,18 @@ func (c *APIClient) DoSDKRequest(ctx context.Context, req *larkcore.ApiReq, as c
 			opts = append(opts, larkcore.WithUserAccessToken(envToken))
 		} else if tokenFile := os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN_FILE"); tokenFile != "" {
 			// External token injection via file — caller writes token before each invocation.
+			// If file doesn't exist, fall through to keychain flow (user may need to auth).
 			fileBytes, err := os.ReadFile(tokenFile)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read token file %s: %v", tokenFile, err)
+			if err == nil {
+				fileToken := strings.TrimSpace(string(fileBytes))
+				if fileToken != "" {
+					opts = append(opts, larkcore.WithUserAccessToken(fileToken))
+				}
+				// empty file → fall through to keychain
 			}
-			fileToken := strings.TrimSpace(string(fileBytes))
-			if fileToken == "" {
-				return nil, fmt.Errorf("token file %s is empty", tokenFile)
-			}
-			opts = append(opts, larkcore.WithUserAccessToken(fileToken))
-		} else {
+			// file not found → fall through to keychain
+		}
+		if len(opts) == 0 {
 			// Standard keychain flow for human users.
 			if c.Config.UserOpenId == "" {
 				return nil, fmt.Errorf("login required: lark-cli auth login (or use --as bot)")

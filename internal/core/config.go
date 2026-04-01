@@ -137,8 +137,14 @@ func RequireAuth(kc keychain.KeychainAccess) (*CliConfig, error) {
 		return nil, err
 	}
 	// External token injection: skip login check
-	if os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN") != "" || os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN_FILE") != "" {
+	if os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN") != "" {
 		return cfg, nil
+	}
+	if tokenFile := os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN_FILE"); tokenFile != "" {
+		if _, err := os.Stat(tokenFile); err == nil {
+			return cfg, nil // file exists, skip login
+		}
+		// file doesn't exist → fall through to normal auth check
 	}
 	if cfg.UserOpenId == "" {
 		return nil, &ConfigError{Code: 3, Type: "auth", Message: "not logged in", Hint: "run `lark-cli auth login` in the background. It blocks and outputs a verification URL — retrieve the URL and open it in a browser to complete login."}
