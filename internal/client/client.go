@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -43,17 +44,57 @@ type APIClient struct {
 	Credential *credential.CredentialProvider
 }
 
+// buildAuthRequiredError 构造"需要用户授权"错误。
+// 文案直接写明给 Agent 的行为指令：发链接给用户、本轮立即结束、禁止重试。
+// 这样无需修改任何 prompt，Agent 读到错误就知道该怎么做。
+func buildAuthRequiredError(reason string) error {
+	authURL := os.Getenv("LARKSUITE_CLI_AUTH_REDIRECT_URL")
+	if authURL == "" {
+		authURL = "请运行 `lark-cli auth login` 完成授权"
+	}
+	return fmt.Errorf(
+		"AUTH_REQUIRED: %s\n\n"+
+			"⚠️ 这不是技术错误，是用户尚未完成飞书授权。\n"+
+			"授权链接: %s\n\n"+
+			"【给 Agent 的指令 - 必须严格遵守】\n"+
+			"1. 立即用 channel_send 把上面的授权链接发给当前用户，说明需要重新授权\n"+
+			"2. 发完链接后【本轮任务必须立即结束】，不要再调用任何工具\n"+
+			"3. 【绝对禁止】重试当前命令或其他 lark-cli 命令——用户没点链接前，重试 100 次都是同样的错\n"+
+			"4. 等用户下一次主动发消息时，再继续未完成的工作",
+		reason, authURL,
+	)
+}
+
 func (c *APIClient) resolveAccessToken(ctx context.Context, as core.Identity) (string, error) {
+	// External token injection via env var — caller manages token lifecycle.
+	// Priority: env var > token file > credential provider chain.
+	if !as.IsBot() {
+		if envToken := os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN"); envToken != "" {
+			return envToken, nil
+		}
+		if tokenFile := os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN_FILE"); tokenFile != "" {
+			fileBytes, err := os.ReadFile(tokenFile)
+			if err != nil {
+				return "", buildAuthRequiredError(fmt.Sprintf("token file not found: %s", tokenFile))
+			}
+			fileToken := strings.TrimSpace(string(fileBytes))
+			if fileToken == "" {
+				return "", buildAuthRequiredError(fmt.Sprintf("token file is empty: %s", tokenFile))
+			}
+			return fileToken, nil
+		}
+	}
+
 	result, err := c.Credential.ResolveToken(ctx, credential.NewTokenSpec(as, c.Config.AppID))
 	if err != nil {
 		var unavailableErr *credential.TokenUnavailableError
 		if errors.As(err, &unavailableErr) {
-			return "", output.ErrAuth("no access token available for %s", as)
+			return "", buildAuthRequiredError(fmt.Sprintf("no access token available for %s", as))
 		}
 		return "", err
 	}
 	if result.Token == "" {
-		return "", output.ErrAuth("no access token available for %s", as)
+		return "", buildAuthRequiredError(fmt.Sprintf("no access token available for %s", as))
 	}
 	return result.Token, nil
 }
