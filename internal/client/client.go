@@ -67,10 +67,14 @@ func buildAuthRequiredError(reason string) error {
 
 func (c *APIClient) resolveAccessToken(ctx context.Context, as core.Identity) (string, error) {
 	// External token injection via env var — caller manages token lifecycle.
-	// Priority: env var > token file > credential provider chain.
+	// 任一外部注入方式被设置时，都作为唯一来源，失败即报错，不 fallback 到 keychain。
+	// Priority: env var > token URL > token file > credential provider chain (keychain).
 	if !as.IsBot() {
 		if envToken := os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN"); envToken != "" {
 			return envToken, nil
+		}
+		if tokenURL := os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN_URL"); tokenURL != "" {
+			return c.fetchTokenFromURL(ctx, tokenURL)
 		}
 		if tokenFile := os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN_FILE"); tokenFile != "" {
 			fileBytes, err := os.ReadFile(tokenFile)
@@ -85,6 +89,7 @@ func (c *APIClient) resolveAccessToken(ctx context.Context, as core.Identity) (s
 		}
 	}
 
+	// 无外部注入 → 走 credential provider chain（keychain / config 文件）
 	result, err := c.Credential.ResolveToken(ctx, credential.NewTokenSpec(as, c.Config.AppID))
 	if err != nil {
 		var unavailableErr *credential.TokenUnavailableError
@@ -95,6 +100,61 @@ func (c *APIClient) resolveAccessToken(ctx context.Context, as core.Identity) (s
 	}
 	if result.Token == "" {
 		return "", buildAuthRequiredError(fmt.Sprintf("no access token available for %s", as))
+	}
+	return result.Token, nil
+}
+
+// fetchTokenFromURL 从 Anya server 的内部端点动态获取最新的 user_access_token。
+// server 侧会自动 refresh 快过期的 token，所以调用方无需关心 token 生命周期。
+func (c *APIClient) fetchTokenFromURL(ctx context.Context, tokenURL string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tokenURL, nil)
+	if err != nil {
+		// 构造请求失败是编程错误，不是授权问题
+		return "", fmt.Errorf("token URL request build failed: %v", err)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		// 连接失败是基础设施问题，不是授权问题，不要让 Agent 发授权链接
+		return "", fmt.Errorf("token URL unreachable (server may be down): %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusUnauthorized {
+		// 401 = token 真的过期且无法 refresh → 授权问题
+		// 尝试从响应体提取 server 提供的 auth_url，优先于 env 里的默认值
+		var authResp struct {
+			AuthURL string `json:"auth_url"`
+		}
+		if json.Unmarshal(body, &authResp) == nil && authResp.AuthURL != "" {
+			return "", fmt.Errorf(
+				"AUTH_REQUIRED: token URL returned HTTP 401\n\n"+
+					"⚠️ 这不是技术错误，是用户尚未完成飞书授权。\n"+
+					"授权链接: %s\n\n"+
+					"【给 Agent 的指令 - 必须严格遵守】\n"+
+					"1. 立即用 channel_send 把上面的授权链接发给当前用户，说明需要重新授权\n"+
+					"2. 发完链接后【本轮任务必须立即结束】，不要再调用任何工具\n"+
+					"3. 【绝对禁止】重试当前命令或其他 lark-cli 命令——用户没点链接前，重试 100 次都是同样的错\n"+
+					"4. 等用户下一次主动发消息时，再继续未完成的工作",
+				authResp.AuthURL,
+			)
+		}
+		return "", buildAuthRequiredError(fmt.Sprintf("token URL returned HTTP 401: %s", strings.TrimSpace(string(body))))
+	}
+	if resp.StatusCode != http.StatusOK {
+		// 其他 HTTP 错误（404 instance 不存在、500 server 内部错误等）不是授权问题
+		return "", fmt.Errorf("token URL returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var result struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("token URL response parse failed: %v", err)
+	}
+	if result.Token == "" {
+		return "", buildAuthRequiredError("token URL returned empty token")
 	}
 	return result.Token, nil
 }
