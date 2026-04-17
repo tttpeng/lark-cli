@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,7 +19,6 @@ import (
 
 	"github.com/larksuite/cli/internal/core"
 	"github.com/larksuite/cli/internal/credential"
-	"github.com/larksuite/cli/internal/output"
 )
 
 // roundTripFunc is an adapter to use a function as http.RoundTripper.
@@ -384,6 +382,9 @@ func TestDoStream_IgnoresBaseHTTPClientTimeout(t *testing.T) {
 }
 
 func TestDoSDKRequest_MissingTokenReturnsAuthError(t *testing.T) {
+	t.Setenv("LARKSUITE_CLI_APP_ID", "")
+	t.Setenv("LARKSUITE_CLI_APP_SECRET", "")
+	t.Setenv("LARKSUITE_CLI_TENANT_ACCESS_TOKEN", "")
 	ac, _ := newTestAPIClient(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		t.Fatal("unexpected HTTP request")
 		return nil, nil
@@ -397,13 +398,15 @@ func TestDoSDKRequest_MissingTokenReturnsAuthError(t *testing.T) {
 	if err == nil {
 		t.Fatal("DoSDKRequest() error = nil, want auth error")
 	}
-	var exitErr *output.ExitError
-	if !strings.Contains(err.Error(), "no access token available") || !errors.As(err, &exitErr) || exitErr.Detail == nil || exitErr.Detail.Type != "auth" {
-		t.Fatalf("DoSDKRequest() error = %v, want auth error", err)
+	if !strings.Contains(err.Error(), "AUTH_REQUIRED") || !strings.Contains(err.Error(), "no access token available") {
+		t.Fatalf("DoSDKRequest() error = %v, want AUTH_REQUIRED with token message", err)
 	}
 }
 
 func TestDoStream_MissingTokenReturnsAuthError(t *testing.T) {
+	t.Setenv("LARKSUITE_CLI_APP_ID", "")
+	t.Setenv("LARKSUITE_CLI_APP_SECRET", "")
+	t.Setenv("LARKSUITE_CLI_TENANT_ACCESS_TOKEN", "")
 	ac := &APIClient{
 		HTTP:       &http.Client{},
 		Credential: credential.NewCredentialProvider(nil, nil, &missingTokenResolver{}, nil),
@@ -417,8 +420,7 @@ func TestDoStream_MissingTokenReturnsAuthError(t *testing.T) {
 	if err == nil {
 		t.Fatal("DoStream() error = nil, want auth error")
 	}
-	var exitErr *output.ExitError
-	if !strings.Contains(err.Error(), "no access token available") || !errors.As(err, &exitErr) || exitErr.Detail == nil || exitErr.Detail.Type != "auth" {
-		t.Fatalf("DoStream() error = %v, want auth error", err)
+	if !strings.Contains(err.Error(), "AUTH_REQUIRED") || !strings.Contains(err.Error(), "no access token available") {
+		t.Fatalf("DoStream() error = %v, want AUTH_REQUIRED with token message", err)
 	}
 }

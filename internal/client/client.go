@@ -66,11 +66,9 @@ func buildAuthRequiredError(reason string) error {
 }
 
 // ResolveAccessToken returns a valid access token for the given identity.
-// Priority: env var > token URL > token file > credential provider chain (keychain).
+// For user: env var > token URL > token file > credential provider chain.
+// For bot: env var > app_secret API > credential provider chain.
 func (c *APIClient) ResolveAccessToken(ctx context.Context, as core.Identity) (string, error) {
-	// External token injection via env var — caller manages token lifecycle.
-	// 任一外部注入方式被设置时，都作为唯一来源，失败即报错，不 fallback 到 keychain。
-	// Priority: env var > token URL > token file > credential provider chain (keychain).
 	if !as.IsBot() {
 		if envToken := os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN"); envToken != "" {
 			return envToken, nil
@@ -89,6 +87,15 @@ func (c *APIClient) ResolveAccessToken(ctx context.Context, as core.Identity) (s
 			}
 			return fileToken, nil
 		}
+	} else {
+		if envToken := os.Getenv("LARKSUITE_CLI_TENANT_ACCESS_TOKEN"); envToken != "" {
+			return envToken, nil
+		}
+		appID := os.Getenv("LARKSUITE_CLI_APP_ID")
+		appSecret := os.Getenv("LARKSUITE_CLI_APP_SECRET")
+		if appID != "" && appSecret != "" {
+			return c.fetchTATFromAPI(ctx, appID, appSecret)
+		}
 	}
 
 	// 无外部注入 → 走 credential provider chain（keychain / config 文件）
@@ -104,6 +111,49 @@ func (c *APIClient) ResolveAccessToken(ctx context.Context, as core.Identity) (s
 		return "", buildAuthRequiredError(fmt.Sprintf("no access token available for %s", as))
 	}
 	return result.Token, nil
+}
+
+// fetchTATFromAPI 用 app_id + app_secret 实时换取 tenant_access_token。
+func (c *APIClient) fetchTATFromAPI(ctx context.Context, appID, appSecret string) (string, error) {
+	ep := core.ResolveEndpoints(c.Config.Brand)
+	apiURL := ep.Open + "/open-apis/auth/v3/tenant_access_token/internal"
+
+	body, err := json.Marshal(map[string]string{"app_id": appID, "app_secret": appSecret})
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal TAT request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("failed to build TAT request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("TAT API unreachable: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("TAT API returned HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Code              int    `json:"code"`
+		Msg               string `json:"msg"`
+		TenantAccessToken string `json:"tenant_access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to parse TAT response: %w", err)
+	}
+	if result.Code != 0 {
+		return "", fmt.Errorf("TAT API error: [%d] %s", result.Code, result.Msg)
+	}
+	if result.TenantAccessToken == "" {
+		return "", buildAuthRequiredError("TAT API returned empty token")
+	}
+	return result.TenantAccessToken, nil
 }
 
 // fetchTokenFromURL 从 Anya server 的内部端点动态获取最新的 user_access_token。

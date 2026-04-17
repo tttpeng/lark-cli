@@ -168,7 +168,7 @@ func TestCredentialProvider_TokenDoesNotMixSourcesAfterDefaultAccountSelection(t
 	}
 }
 
-func TestCredentialProvider_SelectedSourceWithoutTokenReturnsUnavailableError(t *testing.T) {
+func TestCredentialProvider_SelectedSourceWithoutTokenFallsThrough(t *testing.T) {
 	cp := NewCredentialProvider(
 		[]extcred.Provider{&mockExtProvider{
 			name:    "env",
@@ -181,6 +181,7 @@ func TestCredentialProvider_SelectedSourceWithoutTokenReturnsUnavailableError(t 
 		t.Fatalf("ResolveAccount() error = %v", err)
 	}
 
+	// env has account but no token, no default provider → unavailable error without source
 	_, err := cp.ResolveToken(context.Background(), TokenSpec{Type: TokenTypeUAT})
 	if err == nil {
 		t.Fatal("ResolveToken() error = nil, want unavailable error")
@@ -189,8 +190,34 @@ func TestCredentialProvider_SelectedSourceWithoutTokenReturnsUnavailableError(t 
 	if !errors.As(err, &unavailableErr) {
 		t.Fatalf("ResolveToken() error type = %T, want *TokenUnavailableError", err)
 	}
-	if unavailableErr.Source != "env" || unavailableErr.Type != TokenTypeUAT {
-		t.Fatalf("ResolveToken() unavailable error = %+v, want source env and type uat", unavailableErr)
+	if unavailableErr.Type != TokenTypeUAT {
+		t.Fatalf("ResolveToken() unavailable error type = %s, want uat", unavailableErr.Type)
+	}
+}
+
+func TestCredentialProvider_SelectedSourceFallsThroughToDefault(t *testing.T) {
+	// env provider wins account resolution but has no TAT;
+	// default provider should get a chance to resolve it.
+	cp := NewCredentialProvider(
+		[]extcred.Provider{&mockExtProvider{
+			name:    "env",
+			account: &extcred.Account{AppID: "ext_app", Brand: "feishu"},
+		}},
+		nil,
+		&mockDefaultToken{result: &TokenResult{Token: "default_tat"}},
+		nil,
+	)
+
+	if _, err := cp.ResolveAccount(context.Background()); err != nil {
+		t.Fatalf("ResolveAccount() error = %v", err)
+	}
+
+	result, err := cp.ResolveToken(context.Background(), TokenSpec{Type: TokenTypeTAT})
+	if err != nil {
+		t.Fatalf("ResolveToken() error = %v, want nil", err)
+	}
+	if result.Token != "default_tat" {
+		t.Fatalf("ResolveToken() token = %s, want default_tat", result.Token)
 	}
 }
 

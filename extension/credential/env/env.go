@@ -68,11 +68,12 @@ func (p *Provider) ResolveAccount(ctx context.Context) (*credential.Account, err
 	case "off":
 		acct.SupportedIdentities = credential.SupportsAll
 	case "":
-		// Infer from available tokens
-		if hasUAT {
+		// Infer from available tokens and dynamic injection indicators
+		if hasUAT || os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN_URL") != "" ||
+			os.Getenv("LARKSUITE_CLI_USER_ACCESS_TOKEN_FILE") != "" {
 			acct.SupportedIdentities |= credential.SupportsUser
 		}
-		if hasTAT {
+		if hasTAT || appSecret != "" {
 			acct.SupportedIdentities |= credential.SupportsBot
 		}
 	default:

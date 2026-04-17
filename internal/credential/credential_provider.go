@@ -301,13 +301,22 @@ func (p *CredentialProvider) doResolveIdentityHint(ctx context.Context) (*Identi
 }
 
 // ResolveToken resolves an access token.
+// Selected source is tried first; if it doesn't carry the requested token type
+// (e.g. env provides UAT but not TAT), fall through to remaining sources
+// so the default provider can resolve via app_secret or keychain.
 func (p *CredentialProvider) ResolveToken(ctx context.Context, req TokenSpec) (*TokenResult, error) {
 	source, err := p.selectedCredentialSource(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if source != nil {
-		return resolveTokenFromSource(ctx, source, req)
+		result, found, err := source.TryResolveToken(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			return result, nil
+		}
 	}
 
 	for _, prov := range p.providers {

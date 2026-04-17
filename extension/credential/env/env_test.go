@@ -181,7 +181,7 @@ func TestResolveAccount_StrictModeOff(t *testing.T) {
 	}
 }
 
-func TestResolveAccount_InferFromUATOnly(t *testing.T) {
+func TestResolveAccount_InferFromUATWithSecret(t *testing.T) {
 	t.Setenv(envvars.CliAppID, "app")
 	t.Setenv(envvars.CliAppSecret, "secret")
 	t.Setenv(envvars.CliUserAccessToken, "u-tok")
@@ -189,15 +189,28 @@ func TestResolveAccount_InferFromUATOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !acct.SupportedIdentities.UserOnly() {
-		t.Errorf("expected user-only from UAT inference, got %d", acct.SupportedIdentities)
+	// UAT → SupportsUser, APP_SECRET → SupportsBot → SupportsAll
+	if acct.SupportedIdentities != credential.SupportsAll {
+		t.Errorf("expected SupportsAll from UAT+secret inference, got %d", acct.SupportedIdentities)
 	}
 	if acct.DefaultAs != "user" {
 		t.Errorf("expected default-as user from UAT inference, got %q", acct.DefaultAs)
 	}
 }
 
-func TestResolveAccount_InferFromTATOnly(t *testing.T) {
+func TestResolveAccount_InferFromUATOnlyNoSecret(t *testing.T) {
+	t.Setenv(envvars.CliAppID, "app")
+	t.Setenv(envvars.CliUserAccessToken, "u-tok")
+	acct, err := (&Provider{}).ResolveAccount(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !acct.SupportedIdentities.UserOnly() {
+		t.Errorf("expected user-only from UAT-only inference, got %d", acct.SupportedIdentities)
+	}
+}
+
+func TestResolveAccount_InferFromTATWithSecret(t *testing.T) {
 	t.Setenv(envvars.CliAppID, "app")
 	t.Setenv(envvars.CliAppSecret, "secret")
 	t.Setenv(envvars.CliTenantAccessToken, "t-tok")
@@ -205,8 +218,9 @@ func TestResolveAccount_InferFromTATOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// TAT → SupportsBot, APP_SECRET → SupportsBot → BotOnly (no user indicator)
 	if !acct.SupportedIdentities.BotOnly() {
-		t.Errorf("expected bot-only from TAT inference, got %d", acct.SupportedIdentities)
+		t.Errorf("expected bot-only from TAT+secret inference, got %d", acct.SupportedIdentities)
 	}
 	if acct.DefaultAs != "bot" {
 		t.Errorf("expected default-as bot from TAT inference, got %q", acct.DefaultAs)
