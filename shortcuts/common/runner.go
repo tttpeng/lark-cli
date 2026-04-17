@@ -137,17 +137,18 @@ func (ctx *RuntimeContext) getAPIClient() (*client.APIClient, error) {
 }
 
 // AccessToken returns a valid access token for the current identity.
-// For user: returns user access token (with auto-refresh).
-// For bot: returns tenant access token.
+// Delegates to APIClient.ResolveAccessToken which supports all injection methods
+// (env var → URL → file → credential provider chain).
 func (ctx *RuntimeContext) AccessToken() (string, error) {
-	result, err := ctx.Factory.Credential.ResolveToken(ctx.ctx, credential.NewTokenSpec(ctx.As(), ctx.Config.AppID))
+	apiClient, err := ctx.getAPIClient()
+	if err != nil {
+		return "", output.ErrAuth("failed to get API client: %s", err)
+	}
+	token, err := apiClient.ResolveAccessToken(ctx.ctx, ctx.As())
 	if err != nil {
 		return "", output.ErrAuth("failed to get access token: %s", err)
 	}
-	if result == nil || result.Token == "" {
-		return "", output.ErrAuth("no access token available for %s", ctx.As())
-	}
-	return result.Token, nil
+	return token, nil
 }
 
 // LarkSDK returns the eagerly-initialized Lark SDK client.

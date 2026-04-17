@@ -65,7 +65,9 @@ func buildAuthRequiredError(reason string) error {
 	)
 }
 
-func (c *APIClient) resolveAccessToken(ctx context.Context, as core.Identity) (string, error) {
+// ResolveAccessToken returns a valid access token for the given identity.
+// Priority: env var > token URL > token file > credential provider chain (keychain).
+func (c *APIClient) ResolveAccessToken(ctx context.Context, as core.Identity) (string, error) {
 	// External token injection via env var — caller manages token lifecycle.
 	// 任一外部注入方式被设置时，都作为唯一来源，失败即报错，不 fallback 到 keychain。
 	// Priority: env var > token URL > token file > credential provider chain (keychain).
@@ -195,7 +197,7 @@ func (c *APIClient) buildApiReq(request RawApiRequest) (*larkcore.ApiReq, []lark
 func (c *APIClient) DoSDKRequest(ctx context.Context, req *larkcore.ApiReq, as core.Identity, extraOpts ...larkcore.RequestOptionFunc) (*larkcore.ApiResp, error) {
 	var opts []larkcore.RequestOptionFunc
 
-	token, err := c.resolveAccessToken(ctx, as)
+	token, err := c.ResolveAccessToken(ctx, as)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +224,7 @@ func (c *APIClient) DoStream(ctx context.Context, req *larkcore.ApiReq, as core.
 	cfg := buildConfig(opts)
 
 	// Resolve auth
-	token, err := c.resolveAccessToken(ctx, as)
+	token, err := c.ResolveAccessToken(ctx, as)
 	if err != nil {
 		return nil, err
 	}
