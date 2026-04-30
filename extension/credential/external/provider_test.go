@@ -171,6 +171,37 @@ func TestResolveToken_Success(t *testing.T) {
 	}
 }
 
+func TestResolveToken_Success_SourceRedactsQueryString(t *testing.T) {
+	// Token.Source is included in error messages, structured logs and
+	// (sometimes) audit trails downstream. The broker URL's query string
+	// commonly carries the calling principal (session JWT, user_id) and
+	// must not survive into Source. This test locks the redactURL call
+	// in client.go's success branch — without it, principals leak into
+	// every successful auth.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"access_token":"u-ok"}`)
+	}))
+	defer srv.Close()
+
+	t.Setenv(envvars.CliTokenBrokerUATURL, srv.URL+"?session=SECRET_PRINCIPAL")
+
+	tok, err := newProvider().ResolveToken(context.Background(),
+		credential.TokenSpec{Type: credential.TokenTypeUAT})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok == nil {
+		t.Fatal("expected token")
+	}
+	if strings.Contains(tok.Source, "SECRET_PRINCIPAL") {
+		t.Errorf("token Source leaked secret query string: %q", tok.Source)
+	}
+	// Positive assertion: redacted marker present.
+	if !strings.Contains(tok.Source, "<redacted>") {
+		t.Errorf("token Source should contain redaction marker, got %q", tok.Source)
+	}
+}
+
 func TestResolveToken_AuthHeaderPassthrough(t *testing.T) {
 	// The CLI must pass through CliTokenBrokerAuth as the Authorization
 	// header verbatim — this is the channel through which brokers
@@ -245,7 +276,9 @@ func TestResolveToken_ServerError_ReturnsBrokerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv(envvars.CliTokenBrokerUATURL, srv.URL)
+	// Caller principal in query — must never appear in the error string.
+	const principal = "session_jwt=SECRET_PRINCIPAL"
+	t.Setenv(envvars.CliTokenBrokerUATURL, srv.URL+"?"+principal)
 
 	_, err := newProvider().ResolveToken(context.Background(),
 		credential.TokenSpec{Type: credential.TokenTypeUAT})
@@ -258,6 +291,12 @@ func TestResolveToken_ServerError_ReturnsBrokerError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "500") {
 		t.Errorf("error should mention status 500: %v", err)
+	}
+	// Lock the no-leak invariant — if anyone later embeds the broker URL
+	// (or the wrapping error chain that contains it) in this branch, this
+	// assertion catches the regression at PR time.
+	if strings.Contains(err.Error(), "SECRET_PRINCIPAL") {
+		t.Errorf("5xx error must not leak query string: %v", err)
 	}
 }
 

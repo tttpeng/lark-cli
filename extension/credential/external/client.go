@@ -120,6 +120,11 @@ func fetchToken(ctx context.Context, client *http.Client, brokerURL string) (*cr
 		}
 
 	default:
+		// Intentionally omit brokerURL from the error message — query strings
+		// commonly carry caller principal (session JWT, user_id, tenant tag)
+		// and must not leak to stderr / logs. Same defense as the unreachable
+		// branch above (see redactURL). Do NOT add %q url or %v err that
+		// embeds the URL here without a redaction wrapper.
 		return nil, fmt.Errorf("external: broker returned status %d", resp.StatusCode)
 	}
 }
@@ -127,8 +132,10 @@ func fetchToken(ctx context.Context, client *http.Client, brokerURL string) (*cr
 // newHTTPClient builds the broker client honoring CliTokenBrokerTimeout.
 // Accepts both a bare integer ("5", treated as seconds) and any value
 // time.ParseDuration accepts ("5s", "1500ms"). Invalid values fall back
-// to defaultTimeout silently — this is a power-user knob and we'd rather
-// the CLI start than refuse on a typo.
+// to defaultTimeout but emit a stderr warning — the broker is an
+// explicitly configured feature, so a typo silently degrading the
+// timeout is a real footgun. We still don't fail startup, matching the
+// sidecar provider's tolerance for misconfigured non-essential knobs.
 func newHTTPClient() *http.Client {
 	timeout := defaultTimeout
 	if v := os.Getenv(envvars.CliTokenBrokerTimeout); v != "" {
@@ -136,6 +143,10 @@ func newHTTPClient() *http.Client {
 			timeout = d
 		} else if d, err := time.ParseDuration(v + "s"); err == nil && d > 0 {
 			timeout = d
+		} else {
+			fmt.Fprintf(os.Stderr,
+				"WARNING: invalid %s %q, using default %v\n",
+				envvars.CliTokenBrokerTimeout, v, defaultTimeout)
 		}
 	}
 	return &http.Client{Timeout: timeout}

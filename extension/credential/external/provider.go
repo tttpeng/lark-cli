@@ -215,9 +215,24 @@ func applyDefaultAs(acct *credential.Account) error {
 	return nil
 }
 
-// applySupportedIdentities applies STRICT_MODE if set; otherwise uses
-// the inferred default. STRICT_MODE always takes precedence to match
-// env / sidecar provider policy.
+// applySupportedIdentities applies STRICT_MODE when set; otherwise uses
+// the inferred default. Behavior of explicit values (bot / user / off) is
+// identical to env and sidecar providers.
+//
+// Behavior on STRICT_MODE="" differs intentionally between providers:
+//
+//   - sidecar provider treats "" the same as "off" (SupportsAll), because
+//     sidecar always proxies both identities through the trusted server.
+//   - env provider infers from which token env vars are populated
+//     (UAT → SupportsUser, TAT → SupportsBot).
+//   - external provider infers from which broker URLs are configured
+//     (UAT_URL → SupportsUser, TAT_URL → SupportsBot), which is
+//     conceptually closer to env. A broker that's not configured cannot
+//     serve that identity, so declaring SupportsAll would be misleading.
+//
+// STRICT_MODE="off" remains the explicit knob to override the inference
+// when an integrator wants both identities supported regardless of which
+// URLs are configured (e.g. broker that internally redirects).
 func applySupportedIdentities(acct *credential.Account, inferred credential.IdentitySupport) error {
 	switch strictMode := os.Getenv(envvars.CliStrictMode); strictMode {
 	case "bot":
