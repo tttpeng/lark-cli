@@ -36,6 +36,8 @@ jobs:
 
   publish-npm:
     needs: goreleaser
+    # fork 没有 NPM_TOKEN 且无权发 @larksuite scope，仅上游仓库跑这一步
+    if: github.repository == 'larksuite/cli'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
