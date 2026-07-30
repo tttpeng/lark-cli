@@ -19,12 +19,16 @@ import (
 	"github.com/larksuite/cli/cmd/service"
 	"github.com/larksuite/cli/cmd/skill"
 	cmdupdate "github.com/larksuite/cli/cmd/update"
+	"github.com/larksuite/cli/cmd/whoami"
 	_ "github.com/larksuite/cli/events"
+	"github.com/larksuite/cli/internal/apicatalog"
 	"github.com/larksuite/cli/internal/build"
 	"github.com/larksuite/cli/internal/cmdpolicy"
 	"github.com/larksuite/cli/internal/cmdutil"
+	"github.com/larksuite/cli/internal/core"
 	"github.com/larksuite/cli/internal/hook"
 	"github.com/larksuite/cli/internal/keychain"
+	"github.com/larksuite/cli/internal/registry"
 	"github.com/larksuite/cli/shortcuts"
 	"github.com/spf13/cobra"
 )
@@ -33,9 +37,25 @@ import (
 type BuildOption func(*buildConfig)
 
 type buildConfig struct {
-	streams  *cmdutil.IOStreams
-	keychain keychain.KeychainAccess
-	globals  GlobalOptions
+	streams        *cmdutil.IOStreams
+	keychain       keychain.KeychainAccess
+	globals        GlobalOptions
+	skipPlugins    bool
+	skipStrictMode bool
+	skipService    bool
+	serviceCatalog *apicatalog.Catalog
+	startupBrand   core.LarkBrand
+}
+
+// WithStartupBrand initializes the API registry with the given brand before
+// any command registration touches the runtime catalog. Without it the
+// registry's sync.Once locks onto the Feishu default at first catalog access,
+// long before the lazily-resolved config brand is known — see
+// ResolveStartupBrand for the caller-side resolution.
+func WithStartupBrand(brand core.LarkBrand) BuildOption {
+	return func(c *buildConfig) {
+		c.startupBrand = brand
+	}
 }
 
 // WithIO sets the IO streams for the CLI by wrapping raw reader/writers.
@@ -72,6 +92,41 @@ func SetEmbeddedSkillContent(fsys fs.FS) { embeddedSkillContent = fsys }
 func HideProfile(hide bool) BuildOption {
 	return func(c *buildConfig) {
 		c.globals.HideProfile = hide
+	}
+}
+
+// WithoutPlugins builds only repository-owned commands. It is intended for
+// inspection tools that need a deterministic command tree.
+func WithoutPlugins() BuildOption {
+	return func(c *buildConfig) {
+		c.skipPlugins = true
+	}
+}
+
+// WithoutStrictMode builds the complete repository-owned command tree without
+// applying user/profile strict-mode pruning. It is intended for offline
+// inspection tools, not production execution.
+func WithoutStrictMode() BuildOption {
+	return func(c *buildConfig) {
+		c.skipStrictMode = true
+	}
+}
+
+// WithoutServiceCommands builds only hand-authored commands. It is intended for
+// repository quality gates that should not depend on the remote OpenAPI
+// metadata command surface.
+func WithoutServiceCommands() BuildOption {
+	return func(c *buildConfig) {
+		c.skipService = true
+	}
+}
+
+// WithServiceCatalog builds generated service commands from a specific metadata
+// catalog. It is intended for offline inspection tools that need deterministic
+// embedded metadata while production execution keeps using the runtime catalog.
+func WithServiceCatalog(catalog apicatalog.Catalog) BuildOption {
+	return func(c *buildConfig) {
+		c.serviceCatalog = &catalog
 	}
 }
 
@@ -113,6 +168,12 @@ func buildInternal(ctx context.Context, inv cmdutil.InvocationContext, opts ...B
 		cfg.streams = cmdutil.SystemIO()
 	}
 
+	// Initialize the registry brand before anything touches the runtime
+	// catalog (its sync.Once would otherwise lock onto the Feishu default).
+	if cfg.startupBrand != "" {
+		registry.InitWithBrand(cfg.startupBrand)
+	}
+
 	f := cmdutil.NewDefault(cfg.streams, inv)
 	if cfg.keychain != nil {
 		f.Keychain = cfg.keychain
@@ -129,6 +190,10 @@ func buildInternal(ctx context.Context, inv cmdutil.InvocationContext, opts ...B
 	rootCmd.SetIn(cfg.streams.In)
 	rootCmd.SetOut(cfg.streams.Out)
 	rootCmd.SetErr(cfg.streams.ErrOut)
+
+	// Root-only usage template (curated Usage synopsis + skills footer); see
+	// rootUsageTemplate.
+	rootCmd.SetUsageTemplate(rootUsageTemplate)
 
 	installTipsHelpFunc(rootCmd)
 	rootCmd.SilenceErrors = true
@@ -150,19 +215,36 @@ func buildInternal(ctx context.Context, inv cmdutil.InvocationContext, opts ...B
 	rootCmd.AddCommand(auth.NewCmdAuth(f))
 	rootCmd.AddCommand(profile.NewCmdProfile(f))
 	rootCmd.AddCommand(doctor.NewCmdDoctor(f))
+	rootCmd.AddCommand(whoami.NewCmdWhoami(f))
 	rootCmd.AddCommand(api.NewCmdApiWithContext(ctx, f, nil))
 	rootCmd.AddCommand(schema.NewCmdSchema(f, nil))
 	rootCmd.AddCommand(completion.NewCmdCompletion(f))
 	rootCmd.AddCommand(cmdupdate.NewCmdUpdate(f))
 	rootCmd.AddCommand(cmdevent.NewCmdEvents(f))
 	rootCmd.AddCommand(skill.NewCmdSkill(f))
-	service.RegisterServiceCommandsWithContext(ctx, rootCmd, f)
+	if !cfg.skipService {
+		if cfg.serviceCatalog != nil {
+			service.RegisterServiceCommandsFromCatalog(ctx, rootCmd, f, *cfg.serviceCatalog)
+		} else {
+			service.RegisterServiceCommandsWithContext(ctx, rootCmd, f)
+		}
+	}
 	shortcuts.RegisterShortcutsWithContext(ctx, rootCmd, f)
 
-	installUnknownSubcommandGuard(rootCmd)
+	groupRootCommands(rootCmd)
 
-	if mode := f.ResolveStrictMode(ctx); mode.IsActive() {
+	installUnknownSubcommandGuard(rootCmd)
+	// Bare `lark-cli` in an interactive terminal offers an interactive upgrade
+	// before printing help; non-bare invocations and non-TTY are unaffected.
+	installRootUpgradePrompt(f, rootCmd)
+
+	if mode := f.ResolveStrictMode(ctx); mode.IsActive() && !cfg.skipStrictMode {
 		pruneForStrictMode(rootCmd, mode)
+	}
+
+	if cfg.skipPlugins {
+		recordInventory(nil)
+		return f, rootCmd, nil
 	}
 
 	installResult, installErr := installPluginsAndHooks(cfg.streams.ErrOut)

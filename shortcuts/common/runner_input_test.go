@@ -129,9 +129,9 @@ func TestResolveInputFlags_StdinNotSupported(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for stdin not supported")
 	}
-	assertValidationParam(t, err, "--data")
-	if !strings.Contains(err.Error(), "does not support stdin") {
-		t.Errorf("unexpected error: %v", err)
+	vErr := assertValidationParam(t, err, "--data")
+	if !strings.Contains(vErr.Message, "does not support stdin") {
+		t.Errorf("unexpected error message: %q", vErr.Message)
 	}
 }
 
@@ -143,9 +143,9 @@ func TestResolveInputFlags_FileNotSupported(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for file not supported")
 	}
-	assertValidationParam(t, err, "--data")
-	if !strings.Contains(err.Error(), "does not support file input") {
-		t.Errorf("unexpected error: %v", err)
+	vErr := assertValidationParam(t, err, "--data")
+	if !strings.Contains(vErr.Message, "does not support file input") {
+		t.Errorf("unexpected error message: %q", vErr.Message)
 	}
 }
 
@@ -160,9 +160,9 @@ func TestResolveInputFlags_FileNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
-	assertValidationParam(t, err, "--markdown")
-	if !strings.Contains(err.Error(), "cannot read file") {
-		t.Errorf("unexpected error: %v", err)
+	vErr := assertValidationParam(t, err, "--markdown")
+	if !strings.Contains(vErr.Message, "cannot read file") {
+		t.Errorf("unexpected error message: %q", vErr.Message)
 	}
 }
 
@@ -174,9 +174,9 @@ func TestResolveInputFlags_EmptyFilePath(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty file path")
 	}
-	assertValidationParam(t, err, "--markdown")
-	if !strings.Contains(err.Error(), "file path cannot be empty after @") {
-		t.Errorf("unexpected error: %v", err)
+	vErr := assertValidationParam(t, err, "--markdown")
+	if !strings.Contains(vErr.Message, "file path cannot be empty after @") {
+		t.Errorf("unexpected error message: %q", vErr.Message)
 	}
 }
 
@@ -216,9 +216,43 @@ func TestResolveInputFlags_DuplicateStdin(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for duplicate stdin usage")
 	}
-	assertValidationParam(t, err, "--b")
-	if !strings.Contains(err.Error(), "stdin (-) can only be used by one flag") {
-		t.Errorf("unexpected error: %v", err)
+	vErr := assertValidationParam(t, err, "--b")
+	if !strings.Contains(vErr.Message, "stdin (-) can only be used by one flag") {
+		t.Errorf("unexpected error message: %q", vErr.Message)
+	}
+	// The hint must steer an AI agent to the fix (@file for the extra flags),
+	// since `--a - <x --b - <y` is the exact misuse this guards against.
+	if !strings.Contains(vErr.Hint, "@file") {
+		t.Errorf("hint %q should mention @file as the fix", vErr.Hint)
+	}
+}
+
+// TestResolveInputFlags_FileErrorSuggestsStdin pins the recovery hint when
+// an @file path is rejected (typically an absolute /tmp path): flags that
+// also accept stdin must explain the portable `--flag -` form — never cd'ing
+// into the target directory or copying the file into the project tree.
+func TestResolveInputFlags_FileErrorSuggestsStdin(t *testing.T) {
+	rctx := newTestRuntimeWithStdin(map[string]string{"csv": "@/tmp/does-not-exist.csv"}, "")
+	flags := []Flag{{Name: "csv", Input: []string{File, Stdin}}}
+
+	err := resolveInputFlags(rctx, flags)
+	if err == nil {
+		t.Fatal("expected error for rejected @file path")
+	}
+	vErr := assertValidationParam(t, err, "--csv")
+	if !strings.Contains(vErr.Hint, "pipe the file contents") || !strings.Contains(vErr.Hint, "--csv -") {
+		t.Errorf("hint %q should explain the portable stdin form", vErr.Hint)
+	}
+
+	// A flag without stdin support must not get the stdin hint.
+	rctx = newTestRuntimeWithStdin(map[string]string{"file": "@/tmp/does-not-exist.xlsx"}, "")
+	err = resolveInputFlags(rctx, []Flag{{Name: "file", Input: []string{File}}})
+	if err == nil {
+		t.Fatal("expected error for rejected @file path")
+	}
+	vErr = assertValidationParam(t, err, "--file")
+	if strings.Contains(vErr.Hint, "stdin") {
+		t.Errorf("hint %q must not suggest stdin for a file-only flag", vErr.Hint)
 	}
 }
 

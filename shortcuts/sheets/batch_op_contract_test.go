@@ -102,8 +102,8 @@ func TestBatchOp_BodyMatchesStandalone(t *testing.T) {
 		{
 			shortcut: "+rows-resize",
 			sc:       RowsResize,
-			args:     []string{"--sheet-id", "sh1", "--range", "1", "--type", "pixel", "--size", "30"},
-			subInput: `{"sheet-id":"sh1","range":"1","type":"pixel","size":30}`,
+			args:     []string{"--sheet-id", "sh1", "--range", "1", "--height", "30"},
+			subInput: `{"sheet-id":"sh1","range":"1","height":30}`,
 		},
 		{
 			shortcut: "+cols-resize",
@@ -176,6 +176,18 @@ func TestBatchOp_BodyMatchesStandalone(t *testing.T) {
 			sc:       SheetSetTabColor,
 			args:     []string{"--sheet-id", "sh1", "--color", "#FF0000"},
 			subInput: `{"sheet-id":"sh1","color":"#FF0000"}`,
+		},
+		{
+			shortcut: "+sheet-show-gridline",
+			sc:       SheetShowGridline,
+			args:     []string{"--sheet-id", "sh1"},
+			subInput: `{"sheet-id":"sh1"}`,
+		},
+		{
+			shortcut: "+sheet-hide-gridline",
+			sc:       SheetHideGridline,
+			args:     []string{"--sheet-id", "sh1"},
+			subInput: `{"sheet-id":"sh1"}`,
 		},
 		{
 			shortcut: "+dropdown-set",
@@ -397,12 +409,12 @@ func TestBatchOp_ErrorEquivalence(t *testing.T) {
 			wantContains: "--count must be > 0",
 		},
 		{
-			name:         "+rows-resize --type pixel without --size",
+			name:         "+rows-resize --height with --type standard",
 			shortcut:     RowsResize,
-			args:         []string{"--sheet-id", "sh1", "--range", "1:2", "--type", "pixel"},
+			args:         []string{"--sheet-id", "sh1", "--range", "1:2", "--height", "30", "--type", "standard"},
 			subShortcut:  "+rows-resize",
-			subInput:     `{"sheet-id":"sh1","range":"1:2","type":"pixel"}`,
-			wantContains: "--type pixel requires --size",
+			subInput:     `{"sheet-id":"sh1","range":"1:2","height":30,"type":"standard"}`,
+			wantContains: "--height cannot be combined with --type standard",
 		},
 		{
 			name:         "+sheet-delete missing sheet selector",
@@ -432,12 +444,7 @@ func TestBatchOp_ErrorEquivalence(t *testing.T) {
 				t, tc.shortcut,
 				append([]string{"--url", testURL, "--dry-run"}, tc.args...),
 			)
-			if standaloneErr == nil {
-				t.Fatalf("standalone Validate accepted bad input — expected error containing %q", tc.wantContains)
-			}
-			if !strings.Contains(standaloneErr.Error(), tc.wantContains) {
-				t.Errorf("standalone error = %q, want substring %q", standaloneErr.Error(), tc.wantContains)
-			}
+			requireValidation(t, standaloneErr, tc.wantContains)
 
 			// Batch path: translate the matching sub-op. The translator wraps
 			// the inner error with "operations[i] (<shortcut>): " — assert the
@@ -451,18 +458,41 @@ func TestBatchOp_ErrorEquivalence(t *testing.T) {
 				"input":    subInput,
 			}
 			_, batchErr := translateBatchOp(rawOp, testToken, 0)
-			if batchErr == nil {
-				t.Fatalf("batch translator accepted bad input — expected error containing %q", tc.wantContains)
-			}
-			if !strings.Contains(batchErr.Error(), tc.wantContains) {
-				t.Errorf("batch error = %q, want substring %q (operations[i] prefix is fine)", batchErr.Error(), tc.wantContains)
-			}
+			batchVE := requireValidation(t, batchErr, tc.wantContains)
 			// And the wrap context must include the sub-op index + shortcut
 			// name so error reports stay actionable in multi-op batches.
 			wrapHint := "operations[0] (" + tc.subShortcut + "):"
-			if !strings.Contains(batchErr.Error(), wrapHint) {
-				t.Errorf("batch error %q missing context prefix %q", batchErr.Error(), wrapHint)
+			if !strings.Contains(batchVE.Message, wrapHint) {
+				t.Errorf("batch error %q missing context prefix %q", batchVE.Message, wrapHint)
 			}
+		})
+	}
+}
+
+// TestBatchOp_RejectsResizeMapForm locks the nesting guard: the map form
+// (--widths/--heights) expands into its own batch_update, and batch_update
+// cannot nest, so a +batch-update sub-op carrying `widths`/`heights` must be
+// rejected with a pointer to the standalone form — it is standalone-valid,
+// so this case cannot live in the standalone-vs-batch equivalence table.
+func TestBatchOp_RejectsResizeMapForm(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		shortcut string
+		input    string
+	}{
+		{"+cols-resize", `{"sheet-id":"sh1","widths":{"A":100}}`},
+		{"+rows-resize", `{"sheet-id":"sh1","heights":{"1":50}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.shortcut, func(t *testing.T) {
+			t.Parallel()
+			var subInput map[string]interface{}
+			if err := json.Unmarshal([]byte(tc.input), &subInput); err != nil {
+				t.Fatalf("bad input JSON: %v", err)
+			}
+			rawOp := map[string]interface{}{"shortcut": tc.shortcut, "input": subInput}
+			_, err := translateBatchOp(rawOp, testToken, 0)
+			requireValidation(t, err, "not supported inside +batch-update")
 		})
 	}
 }
@@ -517,12 +547,7 @@ func TestBatchOp_RejectsWrongScalarType(t *testing.T) {
 			}
 			rawOp := map[string]interface{}{"shortcut": tc.subShortcut, "input": subInput}
 			_, err := translateBatchOp(rawOp, testToken, 0)
-			if err == nil {
-				t.Fatalf("translateBatchOp accepted wrong-typed field; want error containing %q", tc.wantContains)
-			}
-			if !strings.Contains(err.Error(), tc.wantContains) {
-				t.Errorf("error = %q, want substring %q", err.Error(), tc.wantContains)
-			}
+			requireValidation(t, err, tc.wantContains)
 		})
 	}
 }
@@ -580,12 +605,7 @@ func TestBatchOp_GuardsBeyondCobra(t *testing.T) {
 			}
 			rawOp := map[string]interface{}{"shortcut": tc.subShortcut, "input": subInput}
 			_, err := translateBatchOp(rawOp, testToken, 0)
-			if err == nil {
-				t.Fatalf("translateBatchOp accepted bad input; want error containing %q", tc.wantContains)
-			}
-			if !strings.Contains(err.Error(), tc.wantContains) {
-				t.Errorf("error = %q, want substring %q", err.Error(), tc.wantContains)
-			}
+			requireValidation(t, err, tc.wantContains)
 		})
 	}
 }
@@ -619,10 +639,10 @@ func TestBatchOp_RejectsBadSubOpInput(t *testing.T) {
 			"--position is required",
 		},
 		{
-			"+rows-resize missing --type",
+			"+rows-resize missing both --height and --type",
 			"+rows-resize",
 			`{"sheet-id":"sh1","range":"1:1"}`,
-			"--type is required",
+			"give --height <px> for a pixel size, or --type standard / auto",
 		},
 		{
 			"+range-copy missing --target-range",
@@ -716,12 +736,7 @@ func TestBatchOp_RejectsBadSubOpInput(t *testing.T) {
 				"input":    subInput,
 			}
 			_, err := translateBatchOp(rawOp, testToken, 0)
-			if err == nil {
-				t.Fatalf("translator accepted bad input — expected error containing %q", tc.wantContains)
-			}
-			if !strings.Contains(err.Error(), tc.wantContains) {
-				t.Errorf("error = %q, want substring %q", err.Error(), tc.wantContains)
-			}
+			requireValidation(t, err, tc.wantContains)
 		})
 	}
 }
@@ -782,12 +797,7 @@ func TestBatchOp_SchemaValidatesSubOps(t *testing.T) {
 				"input":    subInput,
 			}
 			_, err := translateBatchOp(rawOp, testToken, 0)
-			if err == nil {
-				t.Fatalf("translator accepted schema-violating sub-op — expected error containing %q", tc.wantContains)
-			}
-			if !strings.Contains(err.Error(), tc.wantContains) {
-				t.Errorf("error = %q, want substring %q", err.Error(), tc.wantContains)
-			}
+			requireValidation(t, err, tc.wantContains)
 		})
 	}
 }
@@ -820,7 +830,7 @@ func TestBatchOp_DispatchCoversReportedBugs(t *testing.T) {
 	// bare single-element ranges.
 	body = parseDryRunBody(t, BatchUpdate, []string{
 		"--url", testURL,
-		"--operations", `[{"shortcut":"+rows-resize","input":{"sheet-id":"sh1","range":"23","type":"pixel","size":40}}]`,
+		"--operations", `[{"shortcut":"+rows-resize","input":{"sheet-id":"sh1","range":"23","height":40}}]`,
 		"--yes",
 	})
 	ops = decodeToolInput(t, body, "batch_update")["operations"].([]interface{})
@@ -901,6 +911,102 @@ func TestBatchOp_RequiredFlagParity(t *testing.T) {
 			// actually ran — reject that shape so the parity check stays honest.
 			if strings.Contains(err.Error(), "specify at least one of") {
 				t.Errorf("%s: got a missing-locator error, not a business-required one (fixture bug): %v", cmd, err)
+			}
+		})
+	}
+}
+
+func TestBatchOp_EnumParity(t *testing.T) {
+	t.Parallel()
+
+	t.Run("canonical casing is normalized before translation", func(t *testing.T) {
+		t.Parallel()
+		got, err := translateBatchOp(map[string]interface{}{
+			"shortcut": "+cells-clear",
+			"input": map[string]interface{}{
+				"sheet-id": "sh1",
+				"range":    "A1:B2",
+				"scope":    "FORMATS",
+			},
+		}, testToken, 0)
+		if err != nil {
+			t.Fatalf("translateBatchOp: %v", err)
+		}
+		input, _ := got["input"].(map[string]interface{})
+		if input["clear_type"] != "formats" {
+			t.Fatalf("clear_type = %v, want formats", input["clear_type"])
+		}
+	})
+
+	t.Run("cross-vocabulary alias is normalized", func(t *testing.T) {
+		t.Parallel()
+		got, err := translateBatchOp(map[string]interface{}{
+			"shortcut": "+cells-set-style",
+			"input": map[string]interface{}{
+				"sheet-id": "sh1", "range": "A1", "vertical-alignment": "center",
+			},
+		}, testToken, 0)
+		if err != nil {
+			t.Fatalf("translateBatchOp: %v", err)
+		}
+		input := got["input"].(map[string]interface{})
+		cells := input["cells"].([][]interface{})
+		style := cells[0][0].(map[string]interface{})["cell_styles"].(map[string]interface{})
+		if style["vertical_alignment"] != "middle" {
+			t.Fatalf("vertical_alignment = %v, want middle", style["vertical_alignment"])
+		}
+	})
+
+	t.Run("underscore input keys are accepted", func(t *testing.T) {
+		t.Parallel()
+		got, err := translateBatchOp(map[string]interface{}{
+			"shortcut": "+range-copy",
+			"input": map[string]interface{}{
+				"sheet_id": "sh1", "source_range": "A1:B2", "target_range": "D1", "paste_type": "values",
+			},
+		}, testToken, 0)
+		if err != nil {
+			t.Fatalf("translateBatchOp: %v", err)
+		}
+		input := got["input"].(map[string]interface{})
+		if input["range"] != "A1:B2" || input["destination_range"] != "D1" || input["paste_type"] != "value_only" {
+			t.Fatalf("translated underscore-key input = %#v", input)
+		}
+	})
+
+	tests := []struct {
+		name     string
+		shortcut string
+		input    map[string]interface{}
+		want     string
+	}{
+		{
+			name:     "invalid clear scope",
+			shortcut: "+cells-clear",
+			input: map[string]interface{}{
+				"sheet-id": "sh1", "range": "A1:B2", "scope": "formtas",
+			},
+			want: "invalid value \"formtas\" for --scope",
+		},
+		{
+			name:     "invalid copy paste type",
+			shortcut: "+range-copy",
+			input: map[string]interface{}{
+				"sheet-id": "sh1", "source-range": "A1:B2", "target-range": "D1", "paste-type": "valuez",
+			},
+			want: "invalid value \"valuez\" for --paste-type",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := translateBatchOp(map[string]interface{}{
+				"shortcut": tt.shortcut,
+				"input":    tt.input,
+			}, testToken, 0)
+			validationErr := requireValidation(t, err, tt.want)
+			if validationErr.Param != "--operations" {
+				t.Errorf("param = %q, want --operations", validationErr.Param)
 			}
 		})
 	}

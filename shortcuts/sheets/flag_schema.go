@@ -6,9 +6,10 @@ package sheets
 import (
 	_ "embed"
 	"encoding/json"
-	"fmt"
 	"sort"
 	"sync"
+
+	"github.com/larksuite/cli/errs"
 )
 
 // ─── --print-schema runtime introspection ─────────────────────────────
@@ -52,7 +53,7 @@ func loadFlagSchemas() (*flagSchemaIndex, error) {
 	flagSchemasOnce.Do(func() {
 		var idx flagSchemaIndex
 		if err := json.Unmarshal(flagSchemasJSON, &idx); err != nil {
-			parseFlagErr = fmt.Errorf("flag-schemas.json: %w", err)
+			parseFlagErr = errs.NewInternalError(errs.SubtypeUnknown, "flag-schemas.json: %v", err).WithCause(err)
 			return
 		}
 		if idx.Flags == nil {
@@ -91,7 +92,7 @@ func printFlagSchemaFor(command string) func(flagName string) ([]byte, error) {
 		}
 		entry, ok := idx.Flags[command]
 		if !ok || len(entry) == 0 {
-			return nil, fmt.Errorf("no JSON Schema registered for %s", command)
+			return nil, errs.NewValidationError(errs.SubtypeInvalidArgument, "no JSON Schema registered for %s", command)
 		}
 		if flagName == "" {
 			flags := make([]string, 0, len(entry))
@@ -112,7 +113,9 @@ func printFlagSchemaFor(command string) func(flagName string) ([]byte, error) {
 				flags = append(flags, f)
 			}
 			sort.Strings(flags)
-			return nil, fmt.Errorf("no JSON Schema registered for %s --%s; available: %v", command, flagName, flags)
+			return nil, errs.NewValidationError(errs.SubtypeInvalidArgument,
+				"no JSON Schema registered for %s --%s; available: %v", command, flagName, flags).
+				WithParam("--flag-name")
 		}
 		// Reformat for readability — schema files store compact JSON.
 		var pretty interface{}

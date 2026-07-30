@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -39,25 +38,27 @@ func TestAppsGitCredentialInitDryRunRequestShape(t *testing.T) {
 		t.Fatalf("dry-run err=%v", err)
 	}
 	var payload struct {
-		API []struct {
-			Method string                 `json:"method"`
-			URL    string                 `json:"url"`
-			Params map[string]interface{} `json:"params"`
-			Body   interface{}            `json:"body"`
-		} `json:"api"`
-		Mode         string   `json:"mode"`
-		Action       string   `json:"action"`
-		AppID        string   `json:"app_id"`
-		MetadataFile string   `json:"metadata_file"`
-		LocalEffects []string `json:"local_effects"`
+		Data struct {
+			API []struct {
+				Method string                 `json:"method"`
+				URL    string                 `json:"url"`
+				Params map[string]interface{} `json:"params"`
+				Body   interface{}            `json:"body"`
+			} `json:"api"`
+			Mode         string   `json:"mode"`
+			Action       string   `json:"action"`
+			AppID        string   `json:"app_id"`
+			MetadataFile string   `json:"metadata_file"`
+			LocalEffects []string `json:"local_effects"`
+		} `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(stdout.String()), &payload); err != nil {
 		t.Fatalf("decode dry-run output: %v\n%s", err, stdout.String())
 	}
-	if len(payload.API) != 1 {
-		t.Fatalf("api len = %d, want 1", len(payload.API))
+	if len(payload.Data.API) != 1 {
+		t.Fatalf("api len = %d, want 1", len(payload.Data.API))
 	}
-	call := payload.API[0]
+	call := payload.Data.API[0]
 	if call.Method != "GET" {
 		t.Fatalf("method = %q, want GET", call.Method)
 	}
@@ -70,22 +71,23 @@ func TestAppsGitCredentialInitDryRunRequestShape(t *testing.T) {
 	if call.Body != nil {
 		t.Fatalf("body = %#v, want nil", call.Body)
 	}
-	if payload.Mode != "api-plus-local-setup" {
-		t.Fatalf("mode = %q", payload.Mode)
+	if payload.Data.Mode != "api-plus-local-setup" {
+		t.Fatalf("mode = %q", payload.Data.Mode)
 	}
-	if payload.Action != "initialize_local_git_credential" {
-		t.Fatalf("action = %q", payload.Action)
+	if payload.Data.Action != "initialize_local_git_credential" {
+		t.Fatalf("action = %q", payload.Data.Action)
 	}
-	if payload.AppID != "app_xxx" {
-		t.Fatalf("app_id = %q", payload.AppID)
+	if payload.Data.AppID != "app_xxx" {
+		t.Fatalf("app_id = %q", payload.Data.AppID)
 	}
-	if !strings.HasSuffix(payload.MetadataFile, filepath.Join("spark", "app_xxx", "git.json")) {
-		t.Fatalf("metadata_file = %q", payload.MetadataFile)
+	if !strings.HasSuffix(payload.Data.MetadataFile, filepath.Join("spark", "app_xxx", "git.json")) {
+		t.Fatalf("metadata_file = %q", payload.Data.MetadataFile)
 	}
-	assertStringSliceEqual(t, payload.LocalEffects, []string{
+	assertStringSliceEqual(t, payload.Data.LocalEffects, []string{
 		"save the issued PAT in the local system credential store",
 		"write app-scoped git credential metadata",
 		"configure a URL-scoped Git credential helper in global git config when possible",
+		"return commit_author_name and commit_author_email for repo-local git identity",
 	})
 }
 
@@ -97,32 +99,34 @@ func TestAppsGitCredentialListDryRunDescribesLocalReads(t *testing.T) {
 		t.Fatalf("dry-run err=%v", err)
 	}
 	var payload struct {
-		Description string        `json:"description"`
-		API         []interface{} `json:"api"`
-		Mode        string        `json:"mode"`
-		Action      string        `json:"action"`
-		StorageRoot string        `json:"storage_root"`
-		Reads       []string      `json:"reads"`
+		Data struct {
+			Description string        `json:"description"`
+			API         []interface{} `json:"api"`
+			Mode        string        `json:"mode"`
+			Action      string        `json:"action"`
+			StorageRoot string        `json:"storage_root"`
+			Reads       []string      `json:"reads"`
+		} `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(stdout.String()), &payload); err != nil {
 		t.Fatalf("decode dry-run output: %v\n%s", err, stdout.String())
 	}
-	if payload.Description != "Preview local Git credential listing (no API call, read-only local state)." {
-		t.Fatalf("description = %q", payload.Description)
+	if payload.Data.Description != "Preview local Git credential listing (no API call, read-only local state)." {
+		t.Fatalf("description = %q", payload.Data.Description)
 	}
-	if len(payload.API) != 0 {
-		t.Fatalf("api len = %d, want 0", len(payload.API))
+	if len(payload.Data.API) != 0 {
+		t.Fatalf("api len = %d, want 0", len(payload.Data.API))
 	}
-	if payload.Mode != "local-read-only" {
-		t.Fatalf("mode = %q", payload.Mode)
+	if payload.Data.Mode != "local-read-only" {
+		t.Fatalf("mode = %q", payload.Data.Mode)
 	}
-	if payload.Action != "list_local_git_credentials" {
-		t.Fatalf("action = %q", payload.Action)
+	if payload.Data.Action != "list_local_git_credentials" {
+		t.Fatalf("action = %q", payload.Data.Action)
 	}
-	if !strings.HasSuffix(payload.StorageRoot, filepath.Join("spark")) {
-		t.Fatalf("storage_root = %q", payload.StorageRoot)
+	if !strings.HasSuffix(payload.Data.StorageRoot, filepath.Join("spark")) {
+		t.Fatalf("storage_root = %q", payload.Data.StorageRoot)
 	}
-	assertStringSliceEqual(t, payload.Reads, []string{
+	assertStringSliceEqual(t, payload.Data.Reads, []string{
 		"scan app-scoped git credential metadata under the CLI config directory",
 		"derive per-app repository URLs and local credential status from local metadata",
 	})
@@ -136,36 +140,38 @@ func TestAppsGitCredentialRemoveDryRunDescribesLocalCleanup(t *testing.T) {
 		t.Fatalf("dry-run err=%v", err)
 	}
 	var payload struct {
-		Description  string        `json:"description"`
-		API          []interface{} `json:"api"`
-		Mode         string        `json:"mode"`
-		Action       string        `json:"action"`
-		AppID        string        `json:"app_id"`
-		MetadataFile string        `json:"metadata_file"`
-		Effects      []string      `json:"effects"`
+		Data struct {
+			Description  string        `json:"description"`
+			API          []interface{} `json:"api"`
+			Mode         string        `json:"mode"`
+			Action       string        `json:"action"`
+			AppID        string        `json:"app_id"`
+			MetadataFile string        `json:"metadata_file"`
+			Effects      []string      `json:"effects"`
+		} `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(stdout.String()), &payload); err != nil {
 		t.Fatalf("decode dry-run output: %v\n%s", err, stdout.String())
 	}
-	if payload.Description != "Preview local Git credential cleanup (no API call; would clean up local-only state)." {
-		t.Fatalf("description = %q", payload.Description)
+	if payload.Data.Description != "Preview local Git credential cleanup (no API call; would clean up local-only state)." {
+		t.Fatalf("description = %q", payload.Data.Description)
 	}
-	if len(payload.API) != 0 {
-		t.Fatalf("api len = %d, want 0", len(payload.API))
+	if len(payload.Data.API) != 0 {
+		t.Fatalf("api len = %d, want 0", len(payload.Data.API))
 	}
-	if payload.Mode != "local-cleanup-only" {
-		t.Fatalf("mode = %q", payload.Mode)
+	if payload.Data.Mode != "local-cleanup-only" {
+		t.Fatalf("mode = %q", payload.Data.Mode)
 	}
-	if payload.Action != "remove_local_git_credential" {
-		t.Fatalf("action = %q", payload.Action)
+	if payload.Data.Action != "remove_local_git_credential" {
+		t.Fatalf("action = %q", payload.Data.Action)
 	}
-	if payload.AppID != "app_xxx" {
-		t.Fatalf("app_id = %q", payload.AppID)
+	if payload.Data.AppID != "app_xxx" {
+		t.Fatalf("app_id = %q", payload.Data.AppID)
 	}
-	if !strings.HasSuffix(payload.MetadataFile, filepath.Join("spark", "app_xxx", "git.json")) {
-		t.Fatalf("metadata_file = %q", payload.MetadataFile)
+	if !strings.HasSuffix(payload.Data.MetadataFile, filepath.Join("spark", "app_xxx", "git.json")) {
+		t.Fatalf("metadata_file = %q", payload.Data.MetadataFile)
 	}
-	assertStringSliceEqual(t, payload.Effects, []string{
+	assertStringSliceEqual(t, payload.Data.Effects, []string{
 		"read app-scoped git credential metadata",
 		"remove the saved PAT from the local system credential store",
 		"remove the app-scoped Git helper from global git config when present",
@@ -825,7 +831,7 @@ func TestRunGitCredentialHelperActions(t *testing.T) {
 func TestFactoryIssuerBranches(t *testing.T) {
 	factory, _, reg := newAppsExecuteFactory(t)
 	expiresAt := time.Now().Add(24 * time.Hour).Unix()
-	reg.Register(&httpmock.Stub{
+	issueStub := &httpmock.Stub{
 		Method: "GET",
 		URL:    "/open-apis/spark/v1/apps/app_xxx/git_info",
 		Body: map[string]interface{}{
@@ -836,13 +842,20 @@ func TestFactoryIssuerBranches(t *testing.T) {
 				"StatusCode": 0,
 			},
 		},
-	})
+	}
+	reg.Register(issueStub)
 	issued, err := (factoryIssuer{f: factory}).Issue(context.Background(), "app_xxx", gitcred.ProfileContext{})
 	if err != nil {
 		t.Fatalf("factory issuer returned error: %v", err)
 	}
 	if issued.PAT != "pat-token" {
 		t.Fatalf("PAT = %q", issued.PAT)
+	}
+	if got := issueStub.CapturedHeaders.Get(cmdutil.HeaderShortcut); got != gitCredentialHelperReportedShortcut {
+		t.Fatalf("%s = %q, want %q", cmdutil.HeaderShortcut, got, gitCredentialHelperReportedShortcut)
+	}
+	if got := issueStub.CapturedHeaders.Get(cmdutil.HeaderExecutionId); got == "" {
+		t.Fatalf("%s header missing", cmdutil.HeaderExecutionId)
 	}
 
 	factory.Config = func() (*core.CliConfig, error) { return nil, errors.New("config failed") }
@@ -877,6 +890,20 @@ func TestFactoryIssuerBranches(t *testing.T) {
 	factory, _, _ = newAppsExecuteFactory(t)
 	if _, err := (factoryIssuer{f: factory}).Issue(context.Background(), "app_xxx", gitcred.ProfileContext{}); err == nil {
 		t.Fatal("factory issuer request error returned nil")
+	}
+}
+
+func TestContextWithGitCredentialHelperShortcutPreservesExistingShortcut(t *testing.T) {
+	ctx := cmdutil.ContextWithShortcut(context.Background(), "apps:+git-credential-init", "exec-existing")
+	got := contextWithGitCredentialHelperShortcut(ctx)
+
+	name, ok := cmdutil.ShortcutNameFromContext(got)
+	if !ok || name != "apps:+git-credential-init" {
+		t.Fatalf("shortcut = %q ok=%v, want existing shortcut", name, ok)
+	}
+	executionID, ok := cmdutil.ExecutionIdFromContext(got)
+	if !ok || executionID != "exec-existing" {
+		t.Fatalf("execution id = %q ok=%v, want existing execution id", executionID, ok)
 	}
 }
 
@@ -1006,25 +1033,24 @@ func TestParseIssueCredentialDataBusinessCodeHasHintNotRetryable(t *testing.T) {
 	}
 }
 
-// TestParseIssueCredentialDataMessageAddsNoExtraSecret verifies the security
-// condition that apps does not ADDITIONALLY inject any token/secret into the
-// Git-credential error it builds. The server `msg` is passed through verbatim
-// into Problem.Message, and the only thing apps adds is the static
-// gitCredentialIssueHint — which itself contains no secret. We feed a benign
-// server msg and assert (a) Message equals that msg exactly, and (b) neither
-// Message nor Hint contains any token/secret-shaped string.
-//
-// Note: server msg passthrough is the shared classifier's responsibility;
-// apps adds only a static hint. There is no msg redaction in this path, so
-// this test does not assert a redaction that does not exist — it asserts
-// that apps injects nothing sensitive of its own.
-func TestParseIssueCredentialDataMessageAddsNoExtraSecret(t *testing.T) {
-	const serverMsg = "permission denied"
+// TestParseIssueCredentialDataRedactsCredentialErrorMessage verifies that the
+// git-credential boundary does not pass server-provided credential details into
+// the user-visible typed envelope message.
+func TestParseIssueCredentialDataRedactsCredentialErrorMessage(t *testing.T) {
+	samplePAT := testPublicSafeJoin("pat", "-sample")
+	samplePassword := "sample-password"
+	serverMsg := "permission denied: " +
+		testCredentialAssignment("token", samplePAT) + " " +
+		testCredentialAssignment("password", samplePassword) + " " +
+		testCredentialURLWithUserInfo("example.com/repo.git", samplePAT)
 	header := http.Header{"X-Tt-Logid": []string{"log_x"}}
 
 	for _, tc := range []struct {
-		name string
-		resp *larkcore.ApiResp
+		name        string
+		resp        *larkcore.ApiResp
+		wantType    errs.Category
+		wantSubtype errs.Subtype
+		wantCode    int
 	}{
 		{
 			name: "http error path",
@@ -1033,6 +1059,9 @@ func TestParseIssueCredentialDataMessageAddsNoExtraSecret(t *testing.T) {
 				RawBody:    []byte(`{"msg":"` + serverMsg + `"}`),
 				Header:     header,
 			},
+			wantType:    errs.CategoryAPI,
+			wantSubtype: errs.SubtypeUnknown,
+			wantCode:    http.StatusForbidden,
 		},
 		{
 			name: "business code path",
@@ -1041,6 +1070,9 @@ func TestParseIssueCredentialDataMessageAddsNoExtraSecret(t *testing.T) {
 				RawBody:    []byte(`{"code":999,"msg":"` + serverMsg + `"}`),
 				Header:     header,
 			},
+			wantType:    errs.CategoryAPI,
+			wantSubtype: errs.SubtypeUnknown,
+			wantCode:    999,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1052,28 +1084,83 @@ func TestParseIssueCredentialDataMessageAddsNoExtraSecret(t *testing.T) {
 			if !ok {
 				t.Fatalf("expected typed errs.Problem, got %T: %v", err, err)
 			}
-			// (a) The server msg survives into the message. The business-code
-			// path passes it through verbatim; the HTTP-status path reports
-			// "HTTP <status>: <body>" via the shared classifier, so assert
-			// containment rather than equality.
-			if !strings.Contains(p.Message, serverMsg) {
-				t.Fatalf("Message = %q, want it to contain server msg %q", p.Message, serverMsg)
+			if p.Category != tc.wantType || p.Subtype != tc.wantSubtype || p.Code != tc.wantCode {
+				t.Fatalf("problem metadata = %s/%s code=%d, want %s/%s code=%d",
+					p.Category, p.Subtype, p.Code, tc.wantType, tc.wantSubtype, tc.wantCode)
 			}
-			// apps adds only the static hint — assert that exact static text,
-			// proving apps injects no per-request secret into the hint either.
+			if !strings.Contains(p.Message, "permission denied") {
+				t.Fatalf("Message = %q, want it to retain non-secret server context", p.Message)
+			}
 			if p.Hint != gitCredentialIssueHint {
 				t.Fatalf("Hint = %q, want the static gitCredentialIssueHint", p.Hint)
 			}
-			// (b) Neither field may contain a token/secret-shaped string that
-			// apps could have added on top of the framework passthrough.
-			secret := regexp.MustCompile(`(?i)(pat-[a-z0-9]+|secret\s*[=:]\s*\S|token\s*[=:]\s*\S|password\s*[=:]\s*\S)`)
 			for field, val := range map[string]string{"Message": p.Message, "Hint": p.Hint} {
-				if secret.MatchString(val) {
-					t.Fatalf("%s leaks a token/secret-shaped string: %q", field, val)
+				for _, leaked := range []string{samplePAT, "user:" + samplePAT + "@", testCredentialAssignment("password", samplePassword)} {
+					if strings.Contains(val, leaked) {
+						t.Fatalf("%s leaks %q: %q", field, leaked, val)
+					}
+				}
+			}
+			for _, want := range []string{
+				testRedactedAssignment("token"),
+				testRedactedAssignment("password"),
+				"https://***@example.com/repo.git",
+			} {
+				if !strings.Contains(p.Message, want) {
+					t.Fatalf("Message missing %q after redaction: %q", want, p.Message)
 				}
 			}
 		})
 	}
+}
+
+func TestParseIssueCredentialDataRedactsSDKErrorPreservesCause(t *testing.T) {
+	samplePAT := testPublicSafeJoin("pat", "-sample")
+	cause := errors.New("transport failed with " + testCredentialAssignment("token", samplePAT))
+
+	_, err := parseIssueCredentialData(nil, cause, errclass.ClassifyContext{})
+	if err == nil {
+		t.Fatal("expected SDK-boundary error, got nil")
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("error does not preserve cause: %v", err)
+	}
+	p, ok := errs.ProblemOf(err)
+	if !ok {
+		t.Fatalf("expected typed errs.Problem, got %T: %v", err, err)
+	}
+	if p.Category != errs.CategoryNetwork || p.Subtype != errs.SubtypeNetworkTransport {
+		t.Fatalf("problem metadata = %s/%s, want %s/%s",
+			p.Category, p.Subtype, errs.CategoryNetwork, errs.SubtypeNetworkTransport)
+	}
+	if strings.Contains(p.Message, samplePAT) {
+		t.Fatalf("message leaks credential value: %q", p.Message)
+	}
+	if want := testRedactedAssignment("token"); !strings.Contains(p.Message, want) {
+		t.Fatalf("message missing %q after redaction: %q", want, p.Message)
+	}
+}
+
+func TestRedactGitCredentialIssueErrorNil(t *testing.T) {
+	if err := redactGitCredentialIssueError(nil); err != nil {
+		t.Fatalf("redactGitCredentialIssueError(nil) = %v, want nil", err)
+	}
+}
+
+func testPublicSafeJoin(parts ...string) string {
+	return strings.Join(parts, "")
+}
+
+func testCredentialAssignment(key, value string) string {
+	return key + "=" + value
+}
+
+func testRedactedAssignment(key string) string {
+	return key + "=<redacted>"
+}
+
+func testCredentialURLWithUserInfo(hostPath, credential string) string {
+	return "https://" + "user:" + credential + "@" + hostPath
 }
 
 type errorReader struct{}

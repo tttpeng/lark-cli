@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/larksuite/cli/errs"
 	"github.com/larksuite/cli/shortcuts/common"
 )
 
@@ -45,6 +46,56 @@ func TestDetectIMFileType(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := detectIMFileType(tt.path); got != tt.want {
 				t.Fatalf("detectIMFileType(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateAudioMessageInput(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{name: "empty", value: ""},
+		{name: "existing file key", value: "file_abc"},
+		{name: "opus file", value: "./voice.opus"},
+		{name: "ogg opus file", value: "./voice.ogg"},
+		{name: "uppercase opus", value: "./VOICE.OPUS"},
+		{name: "mp3 local file", value: "./voice.mp3", wantErr: true},
+		{name: "wav local file", value: "./voice.wav", wantErr: true},
+		{name: "extensionless local path", value: "./voice"},
+		{name: "opus url", value: "https://example.com/voice.opus?download=1"},
+		{name: "ogg url", value: "https://example.com/voice.ogg?download=1"},
+		{name: "mp3 url", value: "https://example.com/voice.mp3?download=1", wantErr: true},
+		{name: "extensionless url", value: "https://example.com/download?id=1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAudioMessageInput("--audio", tt.value)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "--audio supports only Opus audio files") {
+					t.Fatalf("validateAudioMessageInput(%q) error = %v", tt.value, err)
+				}
+				p, ok := errs.ProblemOf(err)
+				if !ok {
+					t.Fatalf("validateAudioMessageInput(%q) error is not typed: %v", tt.value, err)
+				}
+				if p.Category != errs.CategoryValidation || p.Subtype != errs.SubtypeInvalidArgument {
+					t.Fatalf("ProblemOf(%q) = category %q subtype %q", tt.value, p.Category, p.Subtype)
+				}
+				validationErr, ok := err.(*errs.ValidationError)
+				if !ok || validationErr.Param != "--audio" {
+					t.Fatalf("validateAudioMessageInput(%q) param = %q, want --audio", tt.value, validationErr.Param)
+				}
+				if !strings.Contains(p.Hint, "use --file") || !strings.Contains(p.Hint, "ffmpeg") {
+					t.Fatalf("validateAudioMessageInput(%q) hint = %q, want --file and ffmpeg guidance", tt.value, p.Hint)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validateAudioMessageInput(%q) unexpected error = %v", tt.value, err)
 			}
 		})
 	}
@@ -600,6 +651,7 @@ func TestShortcuts(t *testing.T) {
 	want := []string{
 		"+chat-create",
 		"+chat-list",
+		"+chat-members-list",
 		"+chat-messages-list",
 		"+chat-search",
 		"+chat-update",
@@ -621,5 +673,29 @@ func TestShortcuts(t *testing.T) {
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("Shortcuts() commands = %#v, want %#v", commands, want)
+	}
+}
+
+// TestSenderDisplay covers the human-readable sender column: a resolved name wins,
+// otherwise the sender id is shown (AC3 fallback), and a system/senderless message
+// with neither yields an empty string (no name is normal, not an error).
+func TestSenderDisplay(t *testing.T) {
+	cases := []struct {
+		name   string
+		sender map[string]interface{}
+		want   string
+	}{
+		{"name wins", map[string]interface{}{"name": "Bot Alpha", "id": "cli_bot"}, "Bot Alpha"},
+		{"id fallback when no name (AC3)", map[string]interface{}{"id": "cli_bot", "open_bot_id": "ou_bot"}, "cli_bot"},
+		{"user id fallback", map[string]interface{}{"id": "ou_user"}, "ou_user"},
+		{"empty name falls back to id", map[string]interface{}{"name": "", "id": "cli_x"}, "cli_x"},
+		{"no name no id (system)", map[string]interface{}{"sender_type": "system"}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := senderDisplay(c.sender); got != c.want {
+				t.Fatalf("senderDisplay(%#v) = %q, want %q", c.sender, got, c.want)
+			}
+		})
 	}
 }

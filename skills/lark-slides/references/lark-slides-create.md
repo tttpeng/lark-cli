@@ -1,9 +1,24 @@
 
 # slides +create（创建飞书幻灯片）
 
-> **前置条件：** 先阅读 [`../lark-shared/SKILL.md`](../../lark-shared/SKILL.md) 了解认证、全局参数和安全规则。
-
 创建一个新的飞书幻灯片演示文稿，可选一步添加页面内容。
+
+提交源必须是直接生成的单页 `<slide>` XML。禁止从完整 `<presentation>` XML 解析、拆分、重序列化出 slide 数组再提交。
+
+本命令只从零创建演示文稿，没有导入本地 PPT 文件的参数。要把已有 PPTX 变成 Slides，用 `drive +import --file <x.pptx> --type slides`，再在导入结果上编辑，流程见 [lark-slides-pptx-template-workflows.md](lark-slides-pptx-template-workflows.md)。
+
+## 创建方式选择
+
+| 场景 | 推荐方式 |
+|------|----------|
+| 简单 XML（1-3 页、结构简单、几乎无复杂中文和特殊字符） | `slides +create --slides '[...]'` 一步创建 |
+| 复杂 XML（多页、含中文、大段文本、复杂布局、嵌套引号、特殊字符较多） | **两步创建**：先 `slides +create` 创建空白 PPT，再用 [`xml_presentation.slide create`](lark-slides-xml-presentation-slide-create.md) 逐页添加 |
+| 已有 PPT 继续追加或插入页面 | 使用 [`xml_presentation.slide create`](lark-slides-xml-presentation-slide-create.md)，必要时配合 `before_slide_id` |
+
+> [!WARNING]
+> `--slides '[...]'` 的风险点主要在 shell 参数传递，而不是单纯页数。即使只有 1 页，只要 XML 足够复杂，也建议使用两步创建法。
+> [!IMPORTANT]
+> `slides +create --slides` 底层会逐页创建，不是原子操作。中途失败时先记录 `xml_presentation_id`，回读确认当前状态，再继续修复或追加。
 
 ## 命令
 
@@ -23,6 +38,18 @@ lark-cli slides +create --title "项目汇报" --as bot
 # 预览（不执行）
 lark-cli slides +create --title "项目汇报" --slides '[...]' --dry-run
 ```
+
+复杂内容建议按页保存 XML，再用 `jq --rawfile` 组装 `--slides` 参数：
+
+```bash
+lark-cli slides +create --as user --title "项目汇报" \
+  --slides "$(jq -n \
+    --rawfile s1 .lark-slides/plan/project/slide-01.xml \
+    --rawfile s2 .lark-slides/plan/project/slide-02.xml \
+    '[$s1, $s2]')"
+```
+
+`--rawfile` 会把文件内容作为字符串读入 JSON，自动处理 XML 中的引号和换行；不要手动拼接带大量转义符的 JSON 字符串。
 
 ## 返回值
 
@@ -134,4 +161,4 @@ lark-cli slides xml_presentation.slide create --as user \
 ## 相关命令
 
 - [xml_presentation.slide create](lark-slides-xml-presentation-slide-create.md) — 添加幻灯片页面
-- [xml_presentations get](lark-slides-xml-presentations-get.md) — 读取 PPT 内容
+- [slides +xml-get](lark-slides-xml-presentations-get.md) — 读取 PPT 内容并保存到本地文件

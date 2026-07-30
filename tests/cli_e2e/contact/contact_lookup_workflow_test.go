@@ -52,6 +52,7 @@ func TestContact_LookupWorkflowAsUser(t *testing.T) {
 }
 
 func TestContact_LookupWorkflowAsBot(t *testing.T) {
+	clie2e.SkipWithoutTenantAccessToken(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 
@@ -70,7 +71,7 @@ func TestContact_LookupWorkflowAsBot(t *testing.T) {
 			}
 		}
 		result.AssertExitCode(t, 0)
-		result.AssertStdoutStatus(t, 0)
+		result.AssertStdoutStatus(t, true)
 
 		targetOpenID = gjson.Get(result.Stdout, "data.items.0.open_id").String()
 		require.NotEmpty(t, targetOpenID, "expected to find at least one user via raw API")

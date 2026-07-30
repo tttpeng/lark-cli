@@ -31,8 +31,12 @@ var AppsReleaseCreate = common.Shortcut{
 		{Name: "branch", Desc: "release branch (server uses default if omitted)"},
 	},
 	Validate: func(ctx context.Context, rctx *common.RuntimeContext) error {
-		if strings.TrimSpace(rctx.Str("app-id")) == "" {
+		appID := strings.TrimSpace(rctx.Str("app-id"))
+		if appID == "" {
 			return appsValidationParamError("--app-id", "--app-id is required")
+		}
+		if err := validateRealAppID(appID); err != nil {
+			return err
 		}
 		return nil
 	},
@@ -56,9 +60,10 @@ var AppsReleaseCreate = common.Shortcut{
 		out := map[string]interface{}{
 			"release_id": common.GetString(data, "release_id"),
 			"status":     common.GetString(data, "status"),
+			"sync":       common.GetBool(data, "sync"),
 		}
 		rctx.OutFormat(out, nil, func(w io.Writer) {
-			fmt.Fprintf(w, "release_id: %s\nstatus: %s\n", out["release_id"], out["status"])
+			fmt.Fprintf(w, "release_id: %s\nstatus: %s\nsync: %v\n", out["release_id"], out["status"], out["sync"])
 		})
 		return nil
 	},

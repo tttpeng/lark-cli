@@ -7,12 +7,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/larksuite/cli/errs"
 	"github.com/larksuite/cli/internal/apicatalog"
 	"github.com/larksuite/cli/internal/auth"
 	"github.com/larksuite/cli/internal/client"
+	"github.com/larksuite/cli/internal/cmdmeta"
 	"github.com/larksuite/cli/internal/cmdutil"
 	"github.com/larksuite/cli/internal/core"
 	"github.com/larksuite/cli/internal/credential"
@@ -32,13 +34,16 @@ func RegisterServiceCommands(parent *cobra.Command, f *cmdutil.Factory) {
 }
 
 func RegisterServiceCommandsWithContext(ctx context.Context, parent *cobra.Command, f *cmdutil.Factory) {
+	RegisterServiceCommandsFromCatalog(ctx, parent, f, registry.RuntimeCatalog())
+}
+
+func RegisterServiceCommandsFromCatalog(ctx context.Context, parent *cobra.Command, f *cmdutil.Factory, catalog apicatalog.Catalog) {
 	// Drive the service list from the same navigation catalog the method walk
-	// uses — RuntimeCatalog().Services() is the deterministic, sorted view of the
-	// merged metadata — so registration is catalog-sourced end to end. Kept as a
-	// per-service loop rather than a flat WalkMethods(nil) drive precisely so a
-	// service with no methods still gets its bare command (WalkMethods yields one
-	// ref per method, so empty services would vanish).
-	for _, svc := range registry.RuntimeCatalog().Services() {
+	// uses, so registration is catalog-sourced end to end. Kept as a per-service
+	// loop rather than a flat WalkMethods(nil) drive precisely so a service with
+	// no methods still gets its bare command (WalkMethods yields one ref per
+	// method, so empty services would vanish).
+	for _, svc := range catalog.Services() {
 		if svc.Name == "" || svc.ServicePath == "" {
 			continue
 		}
@@ -60,13 +65,36 @@ func registerServiceWithContext(ctx context.Context, parent *cobra.Command, svc 
 	// resource-command chain — one level for a flat dotted resource like
 	// "chat.members", deeper for genuinely nested resources. A service with no
 	// methods keeps its bare command (svcCmd is created above regardless).
-	for _, ref := range apicatalog.ServiceMethods(svc, nil) {
+	refs := apicatalog.ServiceMethods(svc, nil)
+
+	// Collect each resource's verbs up front so resourceShort can summarize a
+	// resource as its verb list from the first ensureChildCommand call.
+	verbs := map[string][]string{}
+	for _, ref := range refs {
+		key := strings.Join(ref.ResourcePath, ".")
+		verbs[key] = append(verbs[key], ref.Method.Name)
+	}
+
+	for _, ref := range refs {
 		resCmd := svcCmd
+		var path []string
 		for _, seg := range ref.ResourcePath {
-			resCmd = ensureChildCommand(resCmd, seg, seg+" operations")
+			path = append(path, seg)
+			resCmd = ensureChildCommand(resCmd, seg, resourceShort(seg, verbs[strings.Join(path, ".")]))
 		}
 		resCmd.AddCommand(buildMethodCommand(ctx, f, newMethodCommandSpec(ref), nil, parent.PersistentFlags()))
 	}
+}
+
+// resourceShort summarizes a resource as its sorted verb list, or the
+// "<name> operations" placeholder for an intermediate group with no methods.
+func resourceShort(seg string, verbs []string) string {
+	if len(verbs) == 0 {
+		return seg + " operations"
+	}
+	sorted := append([]string(nil), verbs...)
+	sort.Strings(sorted)
+	return strings.Join(sorted, ", ")
 }
 
 // serviceShort is the service command's help summary: the localized description
@@ -84,10 +112,12 @@ func serviceShort(svc meta.Service) string {
 func ensureChildCommand(parent *cobra.Command, name, short string) *cobra.Command {
 	for _, c := range parent.Commands() {
 		if c.Name() == name {
+			cmdmeta.SetSource(c, cmdmeta.SourceService, true)
 			return c
 		}
 	}
 	cmd := &cobra.Command{Use: name, Short: short}
+	cmdmeta.SetSource(cmd, cmdmeta.SourceService, true)
 	parent.AddCommand(cmd)
 	return cmd
 }
@@ -171,7 +201,19 @@ type methodCommandSpec struct {
 	// the API declares a body.
 	acceptsBody  bool
 	declaresBody bool
-	affordance   string // rendered hand-authored usage guidance (when-to-use, examples); "" if none
+	paginates    bool   // method accepts a page_token param (so --page-all is meaningful)
+	serviceName  string // owning service name (e.g. "approval"), for the lazy affordance lookup
+}
+
+// methodPaginates reports whether a method takes a page_token param, the signal
+// that makes the --page-all/--page-limit/--page-delay flags meaningful.
+func methodPaginates(m meta.Method) bool {
+	for _, f := range m.Params() {
+		if f.Name == "page_token" {
+			return true
+		}
+	}
+	return false
 }
 
 func newMethodCommandSpec(ref apicatalog.MethodRef) methodCommandSpec {
@@ -180,6 +222,7 @@ func newMethodCommandSpec(ref apicatalog.MethodRef) methodCommandSpec {
 		method:       m,
 		schemaPath:   ref.SchemaPath(),
 		servicePath:  ref.Service.ServicePath,
+		serviceName:  ref.Service.Name,
 		risk:         m.Risk,
 		restricts:    m.RestrictsIdentity(),
 		identities:   m.Identities(),
@@ -187,7 +230,7 @@ func newMethodCommandSpec(ref apicatalog.MethodRef) methodCommandSpec {
 		fileFields:   detectFileFields(m),
 		acceptsBody:  methodTakesBody(m.HTTPMethod),
 		declaresBody: len(m.Data()) > 0 || len(m.Files()) > 0,
-		affordance:   renderAffordance(m),
+		paginates:    methodPaginates(m),
 	}
 }
 
@@ -231,6 +274,7 @@ func buildMethodCommand(ctx context.Context, f *cmdutil.Factory, spec methodComm
 			return serviceMethodRun(opts)
 		},
 	}
+	cmdmeta.SetSource(cmd, cmdmeta.SourceService, true)
 
 	cmd.Flags().StringVar(&opts.Params, "params", "", "Raw URL/query params JSON. Supports - and @file.")
 	if spec.acceptsBody {
@@ -247,6 +291,14 @@ func buildMethodCommand(ctx context.Context, f *cmdutil.Factory, spec methodComm
 	cmd.Flags().BoolVar(&opts.PageAll, "page-all", false, "automatically paginate through all pages")
 	cmd.Flags().IntVar(&opts.PageLimit, "page-limit", 10, "max pages to fetch with --page-all (0 = unlimited)")
 	cmd.Flags().IntVar(&opts.PageDelay, "page-delay", 200, "delay in ms between pages")
+	// Keep the pagination flags registered (a harmless no-op if passed) but hide
+	// them from help on non-paginating commands, so help doesn't imply a
+	// get/write can paginate.
+	if !spec.paginates {
+		for _, name := range []string{"page-all", "page-limit", "page-delay"} {
+			_ = cmd.Flags().MarkHidden(name)
+		}
+	}
 	cmd.Flags().StringVar(&opts.Format, "format", "json", "output format: json|ndjson|table|csv")
 	cmd.Flags().Bool("json", false, "shorthand for --format json")
 	cmd.Flags().StringVarP(&opts.JqExpr, "jq", "q", "", "jq expression to filter JSON output")
@@ -264,10 +316,11 @@ func buildMethodCommand(ctx context.Context, f *cmdutil.Factory, spec methodComm
 
 	// Registered last so the collision guard sees the standard flags above.
 	opts.binder = newParamFlagBinder(cmd, spec.params, reserved)
-	// Single composition point for Long: description, affordance, schema
-	// pointer, and the binder's params-only addendum (params whose flag name is
-	// taken, reachable via --params only).
-	cmd.Long = methodLong(m.Description, spec.affordance, spec.schemaPath, opts.binder.paramsOnlyHelp())
+	// Build-time Long; the agent guidance is added lazily by PrepareMethodHelp
+	// (setMethodHelpData records the coordinates it needs).
+	paramsOnly := opts.binder.paramsOnlyHelp()
+	cmd.Long = methodLong(m.Description, spec.schemaPath, paramsOnly)
+	setMethodHelpData(cmd, spec.serviceName, m.ID, spec.schemaPath, paramsOnly)
 
 	// Group flags for the grouped --help renderer (typed param flags are grouped
 	// as API Parameters by the binder). tagFlagGroup is a no-op for flags not
@@ -285,13 +338,11 @@ func buildMethodCommand(ctx context.Context, f *cmdutil.Factory, spec methodComm
 	tagFlagGroup(cmd.Flags(), "file", groupBody)
 	if fl := cmd.Flags().Lookup("params"); fl != nil {
 		annotate(fl, flagGroupAnnotation, []string{groupRaw})
-		// State the precedence rule where the agent reads it: --params is the
-		// base, typed flags override. Only meaningful when typed flags exist.
+		// Keep the precedence rule on the flag's own one line (not a multi-line
+		// note that breaks the one-entry-per-flag rhythm an agent parses). Only
+		// meaningful when typed flags exist to override.
 		if len(spec.params) > 0 {
-			annotate(fl, flagNoteAnnotation, []string{
-				"Typed API parameter flags above are preferred.",
-				"If both are set, typed flags override matching keys in --params.",
-			})
+			fl.Usage = "Raw URL/query params JSON. Supports - and @file. If both set, typed flags override matching keys in --params."
 		}
 	}
 	for _, name := range []string{"as", "dry-run", "page-all", "page-limit", "page-delay", "yes"} {
@@ -352,9 +403,9 @@ func serviceMethodRun(opts *ServiceMethodOptions) error {
 
 	if opts.DryRun {
 		if fileMeta != nil {
-			return cmdutil.PrintDryRunWithFile(f.IOStreams.Out, request, config, opts.Format, fileMeta.FieldName, fileMeta.FilePath, fileMeta.FormFields)
+			return cmdutil.PrintDryRunWithFile(request, config, serviceDryRunOutputOptions(f, opts), *fileMeta)
 		}
-		return serviceDryRun(f, request, config, opts.Format)
+		return serviceDryRun(f, request, config, opts)
 	}
 
 	if opts.Method.Risk == cmdutil.RiskHighRiskWrite {
@@ -380,7 +431,7 @@ func serviceMethodRun(opts *ServiceMethodOptions) error {
 	checkErr := ac.CheckResponse
 
 	if opts.PageAll {
-		return servicePaginate(opts.Ctx, ac, request, format, opts.JqExpr, out, f.IOStreams.ErrOut,
+		return servicePaginate(opts.Ctx, ac, request, format, opts.JqExpr, out, f.IOStreams.ErrOut, opts.Cmd.CommandPath(),
 			client.PaginationOptions{PageLimit: opts.PageLimit, PageDelay: opts.PageDelay}, checkErr)
 	}
 
@@ -616,24 +667,58 @@ func buildServiceRequest(opts *ServiceMethodOptions) (client.RawApiRequest, *cmd
 	return request, nil, nil
 }
 
-func serviceDryRun(f *cmdutil.Factory, request client.RawApiRequest, config *core.CliConfig, format string) error {
-	return cmdutil.PrintDryRun(f.IOStreams.Out, request, config, format)
+func serviceDryRun(f *cmdutil.Factory, request client.RawApiRequest, config *core.CliConfig, opts *ServiceMethodOptions) error {
+	return cmdutil.PrintDryRun(request, config, serviceDryRunOutputOptions(f, opts))
 }
 
-func servicePaginate(ctx context.Context, ac *client.APIClient, request client.RawApiRequest, format output.Format, jqExpr string, out, errOut io.Writer, pagOpts client.PaginationOptions, checkErr func(interface{}, core.Identity) error) error {
+func serviceDryRunOutputOptions(f *cmdutil.Factory, opts *ServiceMethodOptions) cmdutil.DryRunOutputOptions {
+	return cmdutil.DryRunOutputOptions{
+		Format:      opts.Format,
+		JqExpr:      opts.JqExpr,
+		CommandPath: opts.Cmd.CommandPath(),
+		Identity:    opts.As,
+		Out:         f.IOStreams.Out,
+		ErrOut:      f.IOStreams.ErrOut,
+	}
+}
+
+func servicePaginate(ctx context.Context, ac *client.APIClient, request client.RawApiRequest, format output.Format, jqExpr string, out, errOut io.Writer, commandPath string, pagOpts client.PaginationOptions, checkErr func(interface{}, core.Identity) error) error {
 	if pagOpts.Identity == "" {
 		pagOpts.Identity = request.As
 	}
 	// When jq is set, always aggregate all pages then filter.
 	if jqExpr != "" {
-		return client.PaginateWithJq(ctx, ac, request, jqExpr, out, pagOpts, checkErr)
+		result, err := ac.PaginateAll(ctx, request, pagOpts)
+		if err != nil {
+			return err
+		}
+		if apiErr := checkErr(result, pagOpts.Identity); apiErr != nil {
+			output.FormatValue(out, result, output.FormatJSON)
+			return apiErr
+		}
+		return output.WriteSuccessEnvelope(output.SuccessEnvelopeData(result), output.SuccessEnvelopeOptions{
+			CommandPath: commandPath,
+			Identity:    string(pagOpts.Identity),
+			JqExpr:      jqExpr,
+			Out:         out,
+			ErrOut:      errOut,
+		})
 	}
 
 	switch format {
 	case output.FormatNDJSON, output.FormatTable, output.FormatCSV:
-		pf := output.NewPaginatedFormatter(out, format)
-		result, hasItems, err := ac.StreamPages(ctx, request, func(items []interface{}) {
-			pf.FormatPage(items)
+		emitter := output.NewEmitter(output.EmitterConfig{
+			Out:            out,
+			ErrOut:         errOut,
+			CommandPath:    commandPath,
+			Identity:       string(pagOpts.Identity),
+			NoticeProvider: output.GetNotice,
+		})
+		result, hasItems, err := ac.StreamPages(ctx, request, func(items []interface{}) error {
+			// Streaming formats intentionally emit each page after that page has
+			// passed safety scanning. A later page may still fail, so callers
+			// must use the exit code to distinguish complete vs partial output.
+			return emitter.StreamPage(items, output.StreamOptions{Format: format.String()})
 		}, pagOpts)
 		if err != nil {
 			return err
@@ -643,7 +728,12 @@ func servicePaginate(ctx context.Context, ac *client.APIClient, request client.R
 		}
 		if !hasItems {
 			fmt.Fprintf(errOut, "warning: this API does not return a list, format %q is not supported, falling back to json\n", format)
-			output.FormatValue(out, result, output.FormatJSON)
+			return output.WriteSuccessEnvelope(output.SuccessEnvelopeData(result), output.SuccessEnvelopeOptions{
+				CommandPath: commandPath,
+				Identity:    string(pagOpts.Identity),
+				Out:         out,
+				ErrOut:      errOut,
+			})
 		}
 		return nil
 	default:
@@ -652,9 +742,14 @@ func servicePaginate(ctx context.Context, ac *client.APIClient, request client.R
 			return err
 		}
 		if apiErr := checkErr(result, pagOpts.Identity); apiErr != nil {
+			output.FormatValue(out, result, output.FormatJSON)
 			return apiErr
 		}
-		output.FormatValue(out, result, format)
-		return nil
+		return output.WriteSuccessEnvelope(output.SuccessEnvelopeData(result), output.SuccessEnvelopeOptions{
+			CommandPath: commandPath,
+			Identity:    string(pagOpts.Identity),
+			Out:         out,
+			ErrOut:      errOut,
+		})
 	}
 }

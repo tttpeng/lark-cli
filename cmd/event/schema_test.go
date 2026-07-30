@@ -19,6 +19,29 @@ import (
 	_ "github.com/larksuite/cli/events"
 )
 
+type approvalSchemaJSONPayload struct {
+	JQRootPath           string                           `json:"jq_root_path"`
+	AuthTypes            []string                         `json:"auth_types"`
+	Scopes               []string                         `json:"scopes"`
+	Params               []approvalSchemaJSONParam        `json:"params"`
+	ResolvedOutputSchema approvalSchemaJSONResolvedSchema `json:"resolved_output_schema"`
+}
+
+type approvalSchemaJSONParam struct {
+	Name            string `json:"name"`
+	Type            string `json:"type"`
+	Required        bool   `json:"required"`
+	SubscriptionKey bool   `json:"subscription_key"`
+}
+
+type approvalSchemaJSONResolvedSchema struct {
+	Properties map[string]approvalSchemaJSONProperty `json:"properties"`
+}
+
+type approvalSchemaJSONProperty struct {
+	Format string `json:"format"`
+}
+
 func TestRunSchema_ProcessedKey_Text(t *testing.T) {
 	f, stdout, _, _ := cmdutil.TestFactory(t, &core.CliConfig{AppID: "test"})
 
@@ -93,6 +116,161 @@ func TestRunSchema_JSONOutput(t *testing.T) {
 	}
 	if payload["key"] != "im.message.receive_v1" {
 		t.Errorf("key = %v, want im.message.receive_v1", payload["key"])
+	}
+}
+
+func TestRunSchema_ReceiveMessageAgentFieldsJSON(t *testing.T) {
+	f, stdout, _, _ := cmdutil.TestFactory(t, &core.CliConfig{AppID: "test"})
+
+	if err := runSchema(f, "im.message.receive_v1", true); err != nil {
+		t.Fatalf("runSchema json: %v", err)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, stdout.String())
+	}
+	resolved := payload["resolved_output_schema"].(map[string]interface{})
+	props := resolved["properties"].(map[string]interface{})
+	for _, field := range []string{
+		"root_id",
+		"thread_id",
+		"reply_to",
+		"sender_type",
+		"mentions",
+	} {
+		if _, ok := props[field]; !ok {
+			t.Errorf("receive schema missing field %q", field)
+		}
+	}
+	msgDesc := props["message_id"].(map[string]interface{})["description"].(string)
+	if !strings.Contains(msgDesc, "Recommended idempotency key") {
+		t.Errorf("message_id description should guide deduplication, got %q", msgDesc)
+	}
+	eventDesc := props["event_id"].(map[string]interface{})["description"].(string)
+	if strings.Contains(eventDesc, "safe for deduplication") {
+		t.Errorf("event_id description should not recommend deduplication, got %q", eventDesc)
+	}
+}
+
+func TestRunSchema_TaskUpdateUserAccessJSON(t *testing.T) {
+	f, stdout, _, _ := cmdutil.TestFactory(t, &core.CliConfig{AppID: "test"})
+
+	if err := runSchema(f, "task.task.update_user_access_v2", true); err != nil {
+		t.Fatalf("runSchema json: %v", err)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, stdout.String())
+	}
+	if payload["jq_root_path"] != ".event" {
+		t.Errorf("jq_root_path = %v, want .event", payload["jq_root_path"])
+	}
+	if payload["single_consumer"] != true {
+		t.Errorf("single_consumer = %v, want true", payload["single_consumer"])
+	}
+	resolved := payload["resolved_output_schema"].(map[string]interface{})
+	props := resolved["properties"].(map[string]interface{})
+	eventProps := props["event"].(map[string]interface{})["properties"].(map[string]interface{})
+	if got := eventProps["task_guid"].(map[string]interface{})["format"]; got != "task_guid" {
+		t.Errorf("task_guid format = %v, want task_guid", got)
+	}
+	if _, ok := eventProps["event_types"].(map[string]interface{})["items"].(map[string]interface{})["enum"]; !ok {
+		t.Fatalf("event_types enum missing in schema: %#v", eventProps["event_types"])
+	}
+}
+
+func TestRunSchema_ApprovalStatusChangedJSON(t *testing.T) {
+	tests := []struct {
+		key   string
+		scope string
+	}{
+		{"approval.instance.status_changed_v4", "approval:instance:read"},
+		{"approval.task.status_changed_v4", "approval:task:read"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.key, func(t *testing.T) {
+			t.Setenv("LARKSUITE_CLI_CONFIG_DIR", t.TempDir())
+			f, stdout, _, _ := cmdutil.TestFactory(t, &core.CliConfig{AppID: "test"})
+
+			if err := runSchema(f, tc.key, true); err != nil {
+				t.Fatalf("runSchema json: %v", err)
+			}
+
+			var payload approvalSchemaJSONPayload
+			if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+				t.Fatalf("output is not valid JSON: %v\n%s", err, stdout.String())
+			}
+			if payload.JQRootPath != "." {
+				t.Errorf("jq_root_path = %v, want .", payload.JQRootPath)
+			}
+			if got := payload.AuthTypes; !reflect.DeepEqual(got, []string{"user"}) {
+				t.Errorf("auth_types = %#v, want user", got)
+			}
+			if got := payload.Scopes; !reflect.DeepEqual(got, []string{tc.scope}) {
+				t.Errorf("scopes = %#v, want %s", got, tc.scope)
+			}
+			if len(payload.Params) != 1 {
+				t.Fatalf("params = %#v, want one subscription_type param", payload.Params)
+			}
+			param := payload.Params[0]
+			if param.Name != "subscription_type" || param.Type != "multi" || param.Required || param.SubscriptionKey {
+				t.Fatalf("subscription_type param = %#v, want optional multi non-subscription-key param", param)
+			}
+			props := payload.ResolvedOutputSchema.Properties
+			for _, field := range []string{"type", "event_id", "timestamp", "approval_code", "instance_code", "status", "operate_time"} {
+				if _, ok := props[field]; !ok {
+					t.Errorf("approval schema missing flat field %q: %+v", field, props)
+				}
+			}
+			if _, ok := props["event"]; ok {
+				t.Errorf("approval Custom schema should be flat, got envelope field event: %+v", props)
+			}
+			if got := props["operate_time"].Format; got != "timestamp_ms" {
+				t.Errorf("operate_time format = %v, want timestamp_ms", got)
+			}
+		})
+	}
+}
+
+func TestRunSchema_JSONOutput_VCMeetingLifecycleKeys(t *testing.T) {
+	for _, key := range []string{
+		"vc.meeting.participant_meeting_started_v1",
+		"vc.meeting.participant_meeting_joined_v1",
+	} {
+		t.Run(key, func(t *testing.T) {
+			f, stdout, _, _ := cmdutil.TestFactory(t, &core.CliConfig{AppID: "test"})
+
+			if err := runSchema(f, key, true); err != nil {
+				t.Fatalf("runSchema json: %v", err)
+			}
+
+			var payload map[string]interface{}
+			if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+				t.Fatalf("output is not valid JSON: %v\n%s", err, stdout.String())
+			}
+			if payload["key"] != key {
+				t.Errorf("key = %v, want %s", payload["key"], key)
+			}
+			resolved, ok := payload["resolved_output_schema"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("resolved_output_schema missing or wrong type: %+v", payload)
+			}
+			properties, ok := resolved["properties"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("resolved_output_schema.properties missing or wrong type: %+v", resolved)
+			}
+			for _, field := range []string{"type", "event_id", "timestamp", "meeting_id", "topic", "meeting_no", "start_time", "calendar_event_id"} {
+				if _, ok := properties[field]; !ok {
+					t.Errorf("resolved output schema missing field %q: %+v", field, properties)
+				}
+			}
+			if _, ok := properties["end_time"]; ok {
+				t.Errorf("resolved output schema should not include end_time for %s: %+v", key, properties)
+			}
+		})
 	}
 }
 

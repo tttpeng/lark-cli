@@ -59,7 +59,7 @@ var MinutesTodo = common.Shortcut{
 		"Update: `--operation update --todo-id <id> --todo \"...\" --is-done`.",
 		"Delete: `--operation delete --todo-id <id>`.",
 		"`content` is plain text only; markdown formatting is not supported.",
-		"Use `lark-cli vc +notes --minute-tokens <token>` to read current todos before writing.",
+		"Use `lark-cli minutes +detail --minute-tokens <token> --todo` to read current todos before writing.",
 	},
 	Validate: func(ctx context.Context, runtime *common.RuntimeContext) error {
 		minuteToken := runtime.Str("minute-token")
@@ -288,6 +288,6 @@ func minutesTodoError(err error, minuteToken string) error {
 	}
 	p.Subtype = errs.SubtypePermissionDenied
 	p.Message = fmt.Sprintf("No edit permission for minute %q: cannot update todos.", minuteToken)
-	p.Hint = "Ask the minute owner for minute edit permission"
+	p.Hint = fmt.Sprintf("Ask the user before running: minutes +apply-permission --minute-token %s --perm edit", minuteToken)
 	return err
 }

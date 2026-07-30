@@ -15,6 +15,7 @@ import (
 )
 
 func TestTask_StatusWorkflow(t *testing.T) {
+	clie2e.SkipWithoutTenantAccessToken(t)
 	parentT := t
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
@@ -48,7 +49,7 @@ func TestTask_StatusWorkflow(t *testing.T) {
 		})
 		require.NoError(t, err)
 		result.AssertExitCode(t, 0)
-		result.AssertStdoutStatus(t, 0)
+		result.AssertStdoutStatus(t, true)
 
 		assert.Equal(t, taskGUID, gjson.Get(result.Stdout, "data.task.guid").String())
 		assert.Equal(t, "done", gjson.Get(result.Stdout, "data.task.status").String())
@@ -74,7 +75,7 @@ func TestTask_StatusWorkflow(t *testing.T) {
 		})
 		require.NoError(t, err)
 		result.AssertExitCode(t, 0)
-		result.AssertStdoutStatus(t, 0)
+		result.AssertStdoutStatus(t, true)
 
 		assert.Equal(t, taskGUID, gjson.Get(result.Stdout, "data.task.guid").String())
 		assert.Equal(t, "todo", gjson.Get(result.Stdout, "data.task.status").String())

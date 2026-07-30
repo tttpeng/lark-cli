@@ -34,6 +34,7 @@ func TestSlidesCreateBasic(t *testing.T) {
 			"data": map[string]interface{}{
 				"xml_presentation_id": "pres_abc123",
 				"revision_id":         1,
+				"url":                 "https://tenant.example.com/slides/pres_abc123",
 			},
 		},
 	})
@@ -54,10 +55,8 @@ func TestSlidesCreateBasic(t *testing.T) {
 	if data["title"] != "项目汇报" {
 		t.Fatalf("title = %v, want 项目汇报", data["title"])
 	}
-	// URL is built locally from the token (brand-standard host), not fetched from
-	// drive metas, so it is deterministic and needs no drive scope.
-	if data["url"] != "https://www.feishu.cn/slides/pres_abc123" {
-		t.Fatalf("url = %v, want https://www.feishu.cn/slides/pres_abc123", data["url"])
+	if data["url"] != "https://tenant.example.com/slides/pres_abc123" {
+		t.Fatalf("url = %v, want https://tenant.example.com/slides/pres_abc123", data["url"])
 	}
 	if _, ok := data["permission_grant"]; ok {
 		t.Fatalf("did not expect permission_grant in user mode")
@@ -349,6 +348,56 @@ func TestSlidesCreateWithSlides(t *testing.T) {
 	}
 	if data["slides_added"] != float64(2) {
 		t.Fatalf("slides_added = %v, want 2", data["slides_added"])
+	}
+}
+
+func TestSlidesCreatePreservesSchemaIssues(t *testing.T) {
+	t.Parallel()
+
+	f, stdout, _, reg := cmdutil.TestFactory(t, slidesTestConfig(t, ""))
+	reg.Register(&httpmock.Stub{
+		Method: "POST",
+		URL:    "/open-apis/slides_ai/v1/xml_presentations",
+		Body: map[string]interface{}{
+			"code": 0,
+			"data": map[string]interface{}{
+				"xml_presentation_id": "pres_issues",
+				"issues":              "presentation schema issue",
+			},
+		},
+	})
+	reg.Register(&httpmock.Stub{
+		Method: "POST",
+		URL:    "/open-apis/slides_ai/v1/xml_presentations/pres_issues/slide",
+		Body: map[string]interface{}{
+			"code": 0,
+			"data": map[string]interface{}{
+				"slide_id": "slide_001",
+				"issues":   "slide schema issue",
+			},
+		},
+	})
+
+	err := runSlidesCreateShortcut(t, f, stdout, []string{
+		"+create",
+		"--slides", `["<slide xmlns=\"http://www.larkoffice.com/sml/2.0\"><data/></slide>"]`,
+		"--as", "user",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data := decodeSlidesCreateEnvelope(t, stdout)
+	if data["issues"] != "presentation schema issue" {
+		t.Fatalf("issues = %v, want presentation schema issue", data["issues"])
+	}
+	slideIssues, ok := data["slide_issues"].([]interface{})
+	if !ok || len(slideIssues) != 1 {
+		t.Fatalf("slide_issues = %#v, want one entry", data["slide_issues"])
+	}
+	issue, _ := slideIssues[0].(map[string]interface{})
+	if issue["slide_index"] != float64(1) || issue["slide_id"] != "slide_001" || issue["issues"] != "slide schema issue" {
+		t.Fatalf("slide_issues[0] = %#v", issue)
 	}
 }
 
@@ -647,12 +696,12 @@ func TestSlidesCreateWithoutSlidesUnchanged(t *testing.T) {
 	}
 }
 
-// TestSlidesCreateURLBuiltLocally verifies the presentation URL is constructed
-// locally from the token — no drive metas/batch_query call is made, so creation
-// works for users who only authorized slides scopes. The httpmock registry has no
-// batch_query stub registered; if the shortcut tried to call it, the request would
-// fail the test (unregistered stub), proving the URL is built without a drive call.
-func TestSlidesCreateURLBuiltLocally(t *testing.T) {
+// TestSlidesCreateURLFallsBackToLocalBuild verifies the presentation URL is
+// constructed locally from the token when presentation.create omits url — no
+// drive metas/batch_query call is made, so creation works for users who only
+// authorized slides scopes. The httpmock registry has no batch_query stub
+// registered; if the shortcut tried to call it, the request would fail the test.
+func TestSlidesCreateURLFallsBackToLocalBuild(t *testing.T) {
 	t.Parallel()
 
 	f, stdout, _, reg := cmdutil.TestFactory(t, slidesTestConfig(t, ""))
@@ -665,6 +714,7 @@ func TestSlidesCreateURLBuiltLocally(t *testing.T) {
 			"data": map[string]interface{}{
 				"xml_presentation_id": "pres_local_url",
 				"revision_id":         1,
+				"url":                 "",
 			},
 		},
 	})

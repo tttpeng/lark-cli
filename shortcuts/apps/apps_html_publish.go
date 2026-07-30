@@ -4,28 +4,31 @@
 package apps
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"path/filepath"
 	"strings"
 
+	"github.com/larksuite/cli/errs"
 	"github.com/larksuite/cli/extension/fileio"
-	"github.com/larksuite/cli/internal/client"
 	"github.com/larksuite/cli/internal/validate"
 	"github.com/larksuite/cli/shortcuts/common"
 )
 
-// AppsHTMLPublish packs --path as tar.gz and uploads + publishes via one multipart POST.
+// AppsHTMLPublish packs --path as tar.gz and publishes an HTML app.
 var AppsHTMLPublish = common.Shortcut{
 	Service:     appsService,
 	Command:     "+html-publish",
-	Description: "Publish HTML to an app (single multipart POST returns the access URL)",
+	Description: "Publish HTML to an app (returns url or release_id depending on app type)",
 	Risk:        "write",
 	Tips: []string{
 		"Example: lark-cli apps +html-publish --app-id <app_id> --path ./dist",
 		"Example: lark-cli apps +html-publish --app-id <app_id> --path ./site --dry-run",
 	},
-	Scopes:    []string{"spark:app:write"},
+	Scopes:    []string{"spark:app:write", "spark:app:read"},
 	AuthTypes: []string{"user"},
 	HasFormat: true,
 	Flags: []common.Flag{
@@ -34,8 +37,12 @@ var AppsHTMLPublish = common.Shortcut{
 		{Name: "allow-sensitive", Type: "bool", Desc: "skip the credential-file scan (allow .env / .npmrc / .aws/credentials / etc. in the publish payload)"},
 	},
 	Validate: func(ctx context.Context, rctx *common.RuntimeContext) error {
-		if strings.TrimSpace(rctx.Str("app-id")) == "" {
+		appID := strings.TrimSpace(rctx.Str("app-id"))
+		if appID == "" {
 			return appsValidationParamError("--app-id", "--app-id is required")
+		}
+		if err := validateRealAppID(appID); err != nil {
+			return err
 		}
 		path := strings.TrimSpace(rctx.Str("path"))
 		if path == "" {
@@ -69,9 +76,11 @@ var AppsHTMLPublish = common.Shortcut{
 		appID := strings.TrimSpace(rctx.Str("app-id"))
 		path := strings.TrimSpace(rctx.Str("path"))
 		dry := common.NewDryRunAPI()
-		dry.Desc("Upload tar.gz + publish HTML (multipart, returns url)")
-		dry.POST(fmt.Sprintf("%s/apps/%s/upload_and_release_html_code", apiBasePath, validate.EncodePathSegment(appID))).
-			Set("content_type", "multipart/form-data")
+		dry.Desc("Pack tar.gz → GET pre_release for TOS upload URL → PUT tar.gz to TOS → POST release-create with tos_path; returns release_id")
+		dry.GET(fmt.Sprintf("%s/apps/%s/pre_release", apiBasePath, validate.EncodePathSegment(appID))).
+			PUT("<presigned_upload_url> (from pre_release response)").
+			POST(fmt.Sprintf(releaseCreatePath, validate.EncodePathSegment(appID))).
+			Body(map[string]string{"tos_path": "<from pre_release response>"})
 
 		candidates, err := walkHTMLPublishCandidates(rctx.FileIO(), path)
 		if err != nil {
@@ -83,6 +92,9 @@ var AppsHTMLPublish = common.Shortcut{
 			// envelope field so dry-run still exits 0 (matches repo convention
 			// for dry-run "advisory preview" semantics).
 			dry.Set("validation_error", err.Error())
+		}
+		if hits := oversizeHTMLFiles(candidates); len(hits) > 0 {
+			dry.Set("oversize_html", hits)
 		}
 		dry.Set("file_count", len(candidates))
 		var totalSize int64
@@ -115,14 +127,17 @@ var AppsHTMLPublish = common.Shortcut{
 			AppID: strings.TrimSpace(rctx.Str("app-id")),
 			Path:  strings.TrimSpace(rctx.Str("path")),
 		}
-		client := appsHTMLPublishAPI{runtime: rctx}
-		out, err := runHTMLPublish(ctx, rctx.FileIO(), client, spec)
+
+		out, err := runHTMLPublishTOS(ctx, rctx, spec)
 		if err != nil {
 			return err
 		}
 		rctx.OutFormat(out, nil, func(w io.Writer) {
 			if url, ok := out["url"].(string); ok && url != "" {
 				fmt.Fprintf(w, "url: %s\n", url)
+			}
+			if rid, ok := out["release_id"].(string); ok && rid != "" {
+				fmt.Fprintf(w, "release_id: %s\n", rid)
 			}
 		})
 		return nil
@@ -140,18 +155,22 @@ type appsHTMLPublishSpec struct {
 // per-environment .env.* files for every stage).
 const maxSensitiveListInError = 5
 
+// truncatedJoin joins items with ", ", capping at max entries and appending
+// "(and N more)" for the remainder, so an inline error list stays readable when
+// a payload has many hits.
+func truncatedJoin(items []string, max int) string {
+	if len(items) <= max {
+		return strings.Join(items, ", ")
+	}
+	return strings.Join(items[:max], ", ") + fmt.Sprintf(" (and %d more)", len(items)-max)
+}
+
 // sensitiveCandidatesError builds the Validate-time rejection when --path
 // contains credential files and --allow-sensitive was not set.
 func sensitiveCandidatesError(hits []string) error {
-	var sample string
-	if len(hits) <= maxSensitiveListInError {
-		sample = strings.Join(hits, ", ")
-	} else {
-		sample = strings.Join(hits[:maxSensitiveListInError], ", ") +
-			fmt.Sprintf(" (and %d more)", len(hits)-maxSensitiveListInError)
-	}
 	return appsValidationParamError("--path",
-		"--path contains %d credential file(s) that should not be published: %s", len(hits), sample).
+		"--path contains %d credential file(s) that should not be published: %s",
+		len(hits), truncatedJoin(hits, maxSensitiveListInError)).
 		WithHint("remove these files from the publish payload, OR pass --allow-sensitive if shipping them is intentional (e.g. a docs site demoing credential-file formats)")
 }
 
@@ -168,6 +187,30 @@ var maxHTMLPublishTarballBytes int64 = 20 * 1024 * 1024
 // Mutable for tests.
 var maxHTMLPublishRawBytes int64 = 200 * 1024 * 1024
 
+// maxHTMLPublishSingleHTMLFileBytes 单个 .html 文件上限，对齐妙搭服务端 10MB 约束。
+// 用 var 而非 const，便于单测调小覆盖拦截路径。
+var maxHTMLPublishSingleHTMLFileBytes int64 = 10 * 1024 * 1024
+
+// oversizeHTMLFiles 返回 candidates 中扩展名为 .html（大小写不敏感）且单个 Size 超过
+// maxHTMLPublishSingleHTMLFileBytes 的 RelPath 列表。只针对 .html 文件，不波及图片/字体/JS。
+func oversizeHTMLFiles(candidates []htmlPublishCandidate) []string {
+	var hits []string
+	for _, c := range candidates {
+		if strings.EqualFold(filepath.Ext(c.RelPath), ".html") && c.Size > maxHTMLPublishSingleHTMLFileBytes {
+			hits = append(hits, c.RelPath)
+		}
+	}
+	return hits
+}
+
+// oversizeHTMLFilesError 构造单文件超限的 Validate 风格拒绝。
+func oversizeHTMLFilesError(hits []string) error {
+	return appsValidationParamError("--path",
+		"--path contains %d HTML file(s) exceeding the %d bytes (10MB) per-file limit: %s",
+		len(hits), maxHTMLPublishSingleHTMLFileBytes, truncatedJoin(hits, maxSensitiveListInError)).
+		WithHint("split or trim oversized HTML file(s); the 10MB cap applies to each single .html file")
+}
+
 // ensureIndexHTML 要求 walker 抓到的 candidates 里必须含 index.html。
 // 目录形态：根目录下必须有 index.html。
 // 单文件形态：文件名必须就是 index.html。
@@ -182,13 +225,19 @@ func ensureIndexHTML(candidates []htmlPublishCandidate) error {
 		WithHint("index.html is the app entrypoint; for a directory put index.html at the root, or pass a single file named index.html")
 }
 
-func runHTMLPublish(ctx context.Context, fio fileio.FileIO, publisher appsHTMLPublishClient, spec appsHTMLPublishSpec) (map[string]interface{}, error) {
-	candidates, err := walkHTMLPublishCandidates(fio, spec.Path)
+// prepareHTMLPublishTarball validates candidates under path and builds a
+// tar.gz payload ready for upload. Shared by runHTMLPublish and
+// runHTMLPublishTOS.
+func prepareHTMLPublishTarball(fio fileio.FileIO, path string) (*htmlPublishTarball, error) {
+	candidates, err := walkHTMLPublishCandidates(fio, path)
 	if err != nil {
 		return nil, err
 	}
 	if err := ensureIndexHTML(candidates); err != nil {
 		return nil, err
+	}
+	if hits := oversizeHTMLFiles(candidates); len(hits) > 0 {
+		return nil, oversizeHTMLFilesError(hits)
 	}
 	var rawTotal int64
 	for _, c := range candidates {
@@ -203,21 +252,81 @@ func runHTMLPublish(ctx context.Context, fio fileio.FileIO, publisher appsHTMLPu
 	if err != nil {
 		return nil, err
 	}
-
 	if tarball.Size > maxHTMLPublishTarballBytes {
 		return nil, appsValidationParamError("--path",
 			"packed tar.gz size %d bytes exceeds %d bytes limit", tarball.Size, maxHTMLPublishTarballBytes).
 			WithHint("reduce --path contents, remove unrelated large files, then retry")
 	}
+	return tarball, nil
+}
 
-	resp, err := publisher.HTMLPublish(ctx, spec.AppID, tarball)
+// runHTMLPublishTOS handles the publish path: validate → tar.gz →
+// call pre_release to get TOS upload URL → upload tar.gz to TOS → return
+// tos_path for +release-create --tos-path.
+func runHTMLPublishTOS(ctx context.Context, rctx *common.RuntimeContext, spec appsHTMLPublishSpec) (map[string]interface{}, error) {
+	tarball, err := prepareHTMLPublishTarball(rctx.FileIO(), spec.Path)
 	if err != nil {
-		return nil, client.WrapDoAPIError(err)
+		return nil, err
 	}
 
-	out := map[string]interface{}{}
-	if resp.URL != "" {
-		out["url"] = resp.URL
+	// Step 1: call pre_release to get TOS upload URL and tos_path.
+	preReleasePath := fmt.Sprintf("%s/apps/%s/pre_release", apiBasePath, validate.EncodePathSegment(spec.AppID))
+	preData, err := rctx.CallAPITyped("GET", preReleasePath, nil, nil)
+	if err != nil {
+		return nil, err
 	}
-	return out, nil
+	kvs, _ := preData["kvs"].([]interface{})
+	if len(kvs) == 0 {
+		return nil, appsSubprocessEnvelopeError("pre_release returned no kvs")
+	}
+	kvm := make(map[string]string, len(kvs))
+	for _, item := range kvs {
+		kv, _ := item.(map[string]interface{})
+		if kv == nil {
+			continue
+		}
+		k, _ := kv["key"].(string)
+		v, _ := kv["value"].(string)
+		if k != "" {
+			kvm[k] = v
+		}
+	}
+	uploadURL := kvm["upload_url"]
+	tosPath := kvm["tos_path"]
+	if uploadURL == "" || tosPath == "" {
+		return nil, appsSubprocessEnvelopeError("pre_release kvs missing upload_url or tos_path")
+	}
+
+	// Step 2: upload tar.gz to TOS via presigned URL (bypasses Lark gateway).
+	//nolint:forbidigo // presigned TOS upload bypasses the Lark gateway — raw http is required; not a Lark API call, so RuntimeContext.DoAPI does not apply.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, bytes.NewReader(tarball.Body))
+	if err != nil {
+		return nil, errs.NewNetworkError(errs.SubtypeNetworkTransport, "build TOS upload request").WithCause(err)
+	}
+	req.ContentLength = tarball.Size
+	req.Header.Set("Content-Type", "application/gzip")
+	resp, err := newFileTransferClient().Do(req) //nolint:forbidigo // presigned TOS upload, see above.
+	if err != nil {
+		return nil, errs.NewNetworkError(errs.SubtypeNetworkTransport, "TOS upload failed").WithCause(err).WithRetryable()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		if resp.StatusCode >= 500 {
+			return nil, errs.NewNetworkError(errs.SubtypeNetworkServer, "TOS upload failed: HTTP %d", resp.StatusCode).WithRetryable()
+		}
+		return nil, errs.NewNetworkError(errs.SubtypeNetworkTransport, "TOS upload failed: HTTP %d", resp.StatusCode)
+	}
+
+	// Step 3: call release-create with tos_path to trigger deployment.
+	releasePath := fmt.Sprintf(releaseCreatePath, validate.EncodePathSegment(spec.AppID))
+	releaseData, err := rctx.CallAPITyped("POST", releasePath, nil, map[string]interface{}{
+		"tos_path": tosPath,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"release_id": common.GetString(releaseData, "release_id"),
+	}, nil
 }

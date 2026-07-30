@@ -51,7 +51,7 @@ var SheetInfo = common.Shortcut{
 		return invokeToolDryRun(token, ToolKindRead, "get_sheet_structure", sheetInfoInput(runtime, token, sheetID, sheetName))
 	},
 	Execute: func(ctx context.Context, runtime *common.RuntimeContext) error {
-		token, err := resolveSpreadsheetToken(runtime)
+		token, err := resolveSpreadsheetTokenExec(runtime)
 		if err != nil {
 			return err
 		}
@@ -136,7 +136,7 @@ var DimInsert = common.Shortcut{
 		return invokeToolDryRun(token, ToolKindWrite, "modify_sheet_structure", input)
 	},
 	Execute: func(ctx context.Context, runtime *common.RuntimeContext) error {
-		token, err := resolveSpreadsheetToken(runtime)
+		token, err := resolveSpreadsheetTokenExec(runtime)
 		if err != nil {
 			return err
 		}
@@ -211,7 +211,7 @@ var DimDelete = common.Shortcut{
 		return invokeToolDryRun(token, ToolKindWrite, "modify_sheet_structure", input)
 	},
 	Execute: func(ctx context.Context, runtime *common.RuntimeContext) error {
-		token, err := resolveSpreadsheetToken(runtime)
+		token, err := resolveSpreadsheetTokenExec(runtime)
 		if err != nil {
 			return err
 		}
@@ -300,7 +300,7 @@ var DimFreeze = common.Shortcut{
 		return invokeToolDryRun(token, ToolKindWrite, "modify_sheet_structure", input)
 	},
 	Execute: func(ctx context.Context, runtime *common.RuntimeContext) error {
-		token, err := resolveSpreadsheetToken(runtime)
+		token, err := resolveSpreadsheetTokenExec(runtime)
 		if err != nil {
 			return err
 		}
@@ -395,7 +395,7 @@ func newDimRangeOpShortcut(command, desc, op, risk string) common.Shortcut {
 			return invokeToolDryRun(token, ToolKindWrite, "modify_sheet_structure", input)
 		},
 		Execute: func(ctx context.Context, runtime *common.RuntimeContext) error {
-			token, err := resolveSpreadsheetToken(runtime)
+			token, err := resolveSpreadsheetTokenExec(runtime)
 			if err != nil {
 				return err
 			}
@@ -439,7 +439,7 @@ func newDimGroupShortcut(command, desc, op string) common.Shortcut {
 			return invokeToolDryRun(token, ToolKindWrite, "modify_sheet_structure", input)
 		},
 		Execute: func(ctx context.Context, runtime *common.RuntimeContext) error {
-			token, err := resolveSpreadsheetToken(runtime)
+			token, err := resolveSpreadsheetTokenExec(runtime)
 			if err != nil {
 				return err
 			}
@@ -483,11 +483,11 @@ func dimGroupInput(runtime flagView, token, sheetID, sheetName, op string) (map[
 func parseA1Range(s string) (dimension string, startIdx, endIdx int, err error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return "", 0, 0, fmt.Errorf("range is empty")
+		return "", 0, 0, fmt.Errorf("range is empty") //nolint:forbidigo // intermediate error; callers wrap it into a typed flag validation error
 	}
 	parts := strings.Split(s, ":")
 	if len(parts) > 2 {
-		return "", 0, 0, fmt.Errorf("expected \"start:end\" or single element")
+		return "", 0, 0, fmt.Errorf("expected \"start:end\" or single element") //nolint:forbidigo // intermediate error; callers wrap it into a typed flag validation error
 	}
 	dim1, idx1, err := parseA1Position(parts[0])
 	if err != nil {
@@ -501,10 +501,10 @@ func parseA1Range(s string) (dimension string, startIdx, endIdx int, err error) 
 		return "", 0, 0, err
 	}
 	if dim1 != dim2 {
-		return "", 0, 0, fmt.Errorf("cannot mix row (digits) and column (letters) in one range")
+		return "", 0, 0, fmt.Errorf("cannot mix row (digits) and column (letters) in one range") //nolint:forbidigo // intermediate error; callers wrap it into a typed flag validation error
 	}
 	if idx2 < idx1 {
-		return "", 0, 0, fmt.Errorf("end position is before start")
+		return "", 0, 0, fmt.Errorf("end position is before start") //nolint:forbidigo // intermediate error; callers wrap it into a typed flag validation error
 	}
 	return dim1, idx1, idx2, nil
 }
@@ -515,7 +515,7 @@ func parseA1Range(s string) (dimension string, startIdx, endIdx int, err error) 
 func parseA1Position(s string) (dimension string, idx int, err error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return "", 0, fmt.Errorf("position is empty")
+		return "", 0, fmt.Errorf("position is empty") //nolint:forbidigo // intermediate error; callers wrap it into a typed flag validation error
 	}
 	isDigits := true
 	isLetters := true
@@ -530,14 +530,14 @@ func parseA1Position(s string) (dimension string, idx int, err error) {
 	if isDigits {
 		n, _ := strconv.Atoi(s)
 		if n <= 0 {
-			return "", 0, fmt.Errorf("row number must be >= 1 (got %q)", s)
+			return "", 0, fmt.Errorf("row number must be >= 1 (got %q)", s) //nolint:forbidigo // intermediate error; callers wrap it into a typed flag validation error
 		}
 		return "row", n - 1, nil
 	}
 	if isLetters {
 		return "column", letterToColumnIndex(s), nil
 	}
-	return "", 0, fmt.Errorf("expected pure digits (row number) or letters (column letter), got %q", s)
+	return "", 0, fmt.Errorf("expected pure digits (row number) or letters (column letter), got %q", s) //nolint:forbidigo // intermediate error; callers wrap it into a typed flag validation error
 }
 
 // columnIndexToLetter converts a 0-based column index to the spreadsheet
@@ -593,7 +593,7 @@ var DimMove = common.Shortcut{
 			Set("spreadsheet_token", token)
 	},
 	Execute: func(ctx context.Context, runtime *common.RuntimeContext) error {
-		token, err := resolveSpreadsheetToken(runtime)
+		token, err := resolveSpreadsheetTokenExec(runtime)
 		if err != nil {
 			return err
 		}

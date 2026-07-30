@@ -9,17 +9,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/larksuite/cli/errs"
 	"github.com/larksuite/cli/internal/cmdutil"
 	"github.com/larksuite/cli/internal/core"
 	"github.com/larksuite/cli/internal/output"
 	"github.com/larksuite/cli/internal/selfupdate"
 	"github.com/larksuite/cli/internal/skillscheck"
 )
+
+const runLiveSkillsTestsEnv = "LARKSUITE_CLI_RUN_LIVE_SKILLS_TESTS"
 
 // newTestFactory creates a test factory with minimal config.
 func newTestFactory(t *testing.T) (*cmdutil.Factory, *bytes.Buffer, *bytes.Buffer) {
@@ -28,13 +33,17 @@ func newTestFactory(t *testing.T) (*cmdutil.Factory, *bytes.Buffer, *bytes.Buffe
 	return f, stdout, stderr
 }
 
-// mockDetect sets up newUpdater to return an Updater with the given DetectResult.
+// mockDetect sets up newUpdater to return an Updater with the given DetectResult
+// and fully mocked skills operations. Tests that only care about install-method
+// detection must never fall through to the real npx skills CLI.
 func mockDetect(t *testing.T, result selfupdate.DetectResult) {
 	t.Helper()
 	origNew := newUpdater
 	newUpdater = func() *selfupdate.Updater {
 		u := selfupdate.New()
 		u.DetectOverride = func() selfupdate.DetectResult { return result }
+		u.SkillsIndexFetchOverride = successfulSkillsIndexFetch()
+		u.SkillsCommandOverride = successfulSkillsCommand()
 		return u
 	}
 	t.Cleanup(func() { newUpdater = origNew })
@@ -48,6 +57,27 @@ func mockDetectAndNpm(t *testing.T, result selfupdate.DetectResult, npmFn func(s
 		u := selfupdate.New()
 		u.DetectOverride = func() selfupdate.DetectResult { return result }
 		u.NpmInstallOverride = npmFn
+		u.VerifyOverride = func(string) error { return nil }
+		u.SkillsIndexFetchOverride = successfulSkillsIndexFetch()
+		u.SkillsCommandOverride = successfulSkillsCommand()
+		return u
+	}
+	t.Cleanup(func() { newUpdater = origNew })
+}
+
+// mockDetectAndPnpm mirrors mockDetectAndNpm but wires the pnpm install path
+// and fails the test if the npm install path is invoked.
+func mockDetectAndPnpm(t *testing.T, result selfupdate.DetectResult, pnpmFn func(string) *selfupdate.NpmResult) {
+	t.Helper()
+	origNew := newUpdater
+	newUpdater = func() *selfupdate.Updater {
+		u := selfupdate.New()
+		u.DetectOverride = func() selfupdate.DetectResult { return result }
+		u.PnpmInstallOverride = pnpmFn
+		u.NpmInstallOverride = func(string) *selfupdate.NpmResult {
+			t.Errorf("npm install must not be called for a pnpm install")
+			return &selfupdate.NpmResult{}
+		}
 		u.VerifyOverride = func(string) error { return nil }
 		u.SkillsIndexFetchOverride = successfulSkillsIndexFetch()
 		u.SkillsCommandOverride = successfulSkillsCommand()
@@ -80,6 +110,122 @@ func successfulSkillsCommand() func(args ...string) *selfupdate.NpmResult {
 	}
 }
 
+func mockSkillsSync(t *testing.T) {
+	t.Helper()
+	origNew := newUpdater
+	newUpdater = func() *selfupdate.Updater {
+		u := selfupdate.New()
+		u.SkillsIndexFetchOverride = successfulSkillsIndexFetch()
+		u.SkillsCommandOverride = successfulSkillsCommand()
+		return u
+	}
+	t.Cleanup(func() { newUpdater = origNew })
+}
+
+func TestUpdatePnpm_JSON(t *testing.T) {
+	t.Setenv("LARKSUITE_CLI_CONFIG_DIR", t.TempDir())
+	f, stdout, _ := newTestFactory(t)
+	cmd := NewCmdUpdate(f)
+	cmd.SetArgs([]string{"--json"})
+	origFetch := fetchLatest
+	fetchLatest = func() (string, error) { return "2.0.0", nil }
+	defer func() { fetchLatest = origFetch }()
+	origVersion := currentVersion
+	currentVersion = func() string { return "1.0.0" }
+	defer func() { currentVersion = origVersion }()
+	mockDetectAndPnpm(t,
+		selfupdate.DetectResult{Method: selfupdate.InstallPnpm, ResolvedPath: "/x/node_modules/.pnpm/@larksuite+cli@1.0.0/node_modules/@larksuite/cli/bin/lark-cli", PnpmAvailable: true},
+		func(string) *selfupdate.NpmResult { return &selfupdate.NpmResult{} },
+	)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out := stdout.String(); !strings.Contains(out, `"action": "updated"`) {
+		t.Errorf("expected updated in output, got: %s", out)
+	}
+}
+
+func TestUpdatePnpm_Human(t *testing.T) {
+	t.Setenv("LARKSUITE_CLI_CONFIG_DIR", t.TempDir())
+	f, _, stderr := newTestFactory(t)
+	cmd := NewCmdUpdate(f)
+	cmd.SetArgs([]string{})
+	origFetch := fetchLatest
+	fetchLatest = func() (string, error) { return "2.0.0", nil }
+	defer func() { fetchLatest = origFetch }()
+	origVersion := currentVersion
+	currentVersion = func() string { return "1.0.0" }
+	defer func() { currentVersion = origVersion }()
+	mockDetectAndPnpm(t,
+		selfupdate.DetectResult{Method: selfupdate.InstallPnpm, ResolvedPath: "/x/node_modules/.pnpm/@larksuite+cli@1.0.0/node_modules/@larksuite/cli/bin/lark-cli", PnpmAvailable: true},
+		func(string) *selfupdate.NpmResult { return &selfupdate.NpmResult{} },
+	)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "via pnpm") {
+		t.Errorf("expected 'via pnpm' in stderr, got: %s", out)
+	}
+	if !strings.Contains(out, "Updating skills via pnpm dlx ...") {
+		t.Errorf("expected skills sync to report pnpm dlx launcher, got: %s", out)
+	}
+	if !strings.Contains(out, "Successfully updated") {
+		t.Errorf("expected success message, got: %s", out)
+	}
+}
+
+func TestUpdatePnpm_InstallError_JSON(t *testing.T) {
+	t.Setenv("LARKSUITE_CLI_CONFIG_DIR", t.TempDir())
+	f, stdout, _ := newTestFactory(t)
+	cmd := NewCmdUpdate(f)
+	cmd.SetArgs([]string{"--json"})
+	origFetch := fetchLatest
+	fetchLatest = func() (string, error) { return "2.0.0", nil }
+	defer func() { fetchLatest = origFetch }()
+	origVersion := currentVersion
+	currentVersion = func() string { return "1.0.0" }
+	defer func() { currentVersion = origVersion }()
+	mockDetectAndPnpm(t,
+		selfupdate.DetectResult{Method: selfupdate.InstallPnpm, ResolvedPath: "/x/node_modules/.pnpm/@larksuite+cli@1.0.0/node_modules/@larksuite/cli/bin/lark-cli", PnpmAvailable: true},
+		func(string) *selfupdate.NpmResult { return &selfupdate.NpmResult{Err: errors.New("pnpm boom")} },
+	)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error exit")
+	}
+	if out := stdout.String(); !strings.Contains(out, `"ok": false`) || !strings.Contains(out, "update_error") {
+		t.Errorf("expected failure envelope, got: %s", out)
+	}
+	if out := stdout.String(); !strings.Contains(out, "pnpm install failed") {
+		t.Errorf("expected message to report pnpm as the package manager, got: %s", out)
+	}
+}
+
+func TestUpdatePnpm_Unavailable_ManualFallback(t *testing.T) {
+	t.Setenv("LARKSUITE_CLI_CONFIG_DIR", t.TempDir())
+	f, _, stderr := newTestFactory(t)
+	cmd := NewCmdUpdate(f)
+	cmd.SetArgs([]string{})
+	origFetch := fetchLatest
+	fetchLatest = func() (string, error) { return "2.0.0", nil }
+	defer func() { fetchLatest = origFetch }()
+	origVersion := currentVersion
+	currentVersion = func() string { return "1.0.0" }
+	defer func() { currentVersion = origVersion }()
+	mockDetect(t, selfupdate.DetectResult{Method: selfupdate.InstallPnpm, ResolvedPath: "/x/node_modules/.pnpm/@larksuite+cli@1.0.0/node_modules/@larksuite/cli/bin/lark-cli", PnpmAvailable: false})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "installed via pnpm, but pnpm is not available in PATH") {
+		t.Errorf("expected pnpm manual reason, got: %s", out)
+	}
+	if !strings.Contains(out, "pnpm add -g") {
+		t.Errorf("expected pnpm add -g hint, got: %s", out)
+	}
+}
+
 func TestNormalizeVersion(t *testing.T) {
 	tests := []struct {
 		input string
@@ -100,6 +246,9 @@ func TestNormalizeVersion(t *testing.T) {
 }
 
 func TestUpdateAlreadyUpToDate_JSON(t *testing.T) {
+	t.Setenv("LARKSUITE_CLI_CONFIG_DIR", t.TempDir())
+	mockSkillsSync(t)
+
 	f, stdout, _ := newTestFactory(t)
 
 	cmd := NewCmdUpdate(f)
@@ -128,6 +277,9 @@ func TestUpdateAlreadyUpToDate_JSON(t *testing.T) {
 }
 
 func TestUpdateAlreadyUpToDate_Human(t *testing.T) {
+	t.Setenv("LARKSUITE_CLI_CONFIG_DIR", t.TempDir())
+	mockSkillsSync(t)
+
 	f, _, stderr := newTestFactory(t)
 
 	cmd := NewCmdUpdate(f)
@@ -153,6 +305,7 @@ func TestUpdateAlreadyUpToDate_Human(t *testing.T) {
 }
 
 func TestUpdateManual_JSON(t *testing.T) {
+	t.Setenv("LARKSUITE_CLI_CONFIG_DIR", t.TempDir())
 	f, stdout, _ := newTestFactory(t)
 	cmd := NewCmdUpdate(f)
 	cmd.SetArgs([]string{"--json"})
@@ -184,6 +337,7 @@ func TestUpdateManual_JSON(t *testing.T) {
 }
 
 func TestUpdateManual_Human(t *testing.T) {
+	t.Setenv("LARKSUITE_CLI_CONFIG_DIR", t.TempDir())
 	f, _, stderr := newTestFactory(t)
 	cmd := NewCmdUpdate(f)
 	cmd.SetArgs([]string{})
@@ -265,6 +419,9 @@ func TestUpdateNpm_Human(t *testing.T) {
 	if !strings.Contains(out, "Successfully updated") {
 		t.Errorf("expected success message in stderr, got: %s", out)
 	}
+	if !strings.Contains(out, "Updating skills via npx ...") {
+		t.Errorf("expected skills sync to report npx launcher for npm install, got: %s", out)
+	}
 }
 
 func TestUpdateForce_JSON(t *testing.T) {
@@ -334,13 +491,88 @@ func TestUpdateFetchError_Human(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-nil error, got nil")
 	}
-	var exitErr *output.ExitError
-	if !errors.As(err, &exitErr) {
-		t.Fatalf("expected *output.ExitError, got %T: %v", err, err)
+	var netErr *errs.NetworkError
+	if !errors.As(err, &netErr) {
+		t.Fatalf("expected *errs.NetworkError, got %T: %v", err, err)
 	}
-	if exitErr.Code != output.ExitNetwork {
-		t.Errorf("expected ExitNetwork (%d), got %d", output.ExitNetwork, exitErr.Code)
+	if netErr.Subtype != errs.SubtypeNetworkTransport {
+		t.Errorf("subtype = %q, want %q", netErr.Subtype, errs.SubtypeNetworkTransport)
 	}
+	if got := output.ExitCodeOf(err); got != output.ExitNetwork {
+		t.Errorf("expected ExitNetwork (%d), got %d", output.ExitNetwork, got)
+	}
+}
+
+// TestUpdateInvalidVersion_Human verifies a malformed registry version surfaces
+// as a typed internal error in human mode, keeping the legacy exit code 5.
+func TestUpdateInvalidVersion_Human(t *testing.T) {
+	f, _, _ := newTestFactory(t)
+	cmd := NewCmdUpdate(f)
+	cmd.SetArgs([]string{})
+
+	origFetch := fetchLatest
+	fetchLatest = func() (string, error) { return "not-a-version", nil }
+	defer func() { fetchLatest = origFetch }()
+
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected non-nil error, got nil")
+	}
+	var intErr *errs.InternalError
+	if !errors.As(err, &intErr) {
+		t.Fatalf("expected *errs.InternalError, got %T: %v", err, err)
+	}
+	if intErr.Subtype != errs.SubtypeInvalidResponse {
+		t.Errorf("subtype = %q, want %q", intErr.Subtype, errs.SubtypeInvalidResponse)
+	}
+	if got := output.ExitCodeOf(err); got != output.ExitInternal {
+		t.Errorf("expected ExitInternal (%d), got %d", output.ExitInternal, got)
+	}
+}
+
+// TestReportError pins reportError's two surfaces after the typed migration:
+// human mode returns the typed error unchanged; JSON mode prints the legacy
+// {ok:false, error:{type, message}} envelope and exits bare with the typed
+// error's exit code (parity with the legacy explicit exit-code argument).
+func TestReportError(t *testing.T) {
+	t.Run("human mode returns the typed error", func(t *testing.T) {
+		f, _, _ := newTestFactory(t)
+		typed := errs.NewAPIError(errs.SubtypeUnknown, "failed to prepare update: disk full")
+		err := reportError(&UpdateOptions{JSON: false}, f.IOStreams, "update_error", typed)
+		var apiErr *errs.APIError
+		if !errors.As(err, &apiErr) {
+			t.Fatalf("expected *errs.APIError, got %T: %v", err, err)
+		}
+		if apiErr != typed {
+			t.Errorf("reportError must return the typed error unchanged")
+		}
+		if got := output.ExitCodeOf(err); got != output.ExitAPI {
+			t.Errorf("exit code = %d, want %d (ExitAPI, legacy parity)", got, output.ExitAPI)
+		}
+	})
+
+	t.Run("json mode prints envelope and exits bare with typed code", func(t *testing.T) {
+		f, stdout, _ := newTestFactory(t)
+		typed := errs.NewNetworkError(errs.SubtypeNetworkTransport, "failed to check latest version: timeout")
+		err := reportError(&UpdateOptions{JSON: true}, f.IOStreams, "network", typed)
+		var bareErr *output.BareError
+		if !errors.As(err, &bareErr) {
+			t.Fatalf("expected bare *output.BareError, got %T: %v", err, err)
+		}
+		if bareErr.Code != output.ExitNetwork {
+			t.Errorf("bare exit code = %d, want %d", bareErr.Code, output.ExitNetwork)
+		}
+		out := stdout.String()
+		if !strings.Contains(out, `"type": "network"`) && !strings.Contains(out, `"type":"network"`) {
+			t.Errorf("JSON envelope missing type, got: %s", out)
+		}
+		if !strings.Contains(out, "failed to check latest version: timeout") {
+			t.Errorf("JSON envelope missing message, got: %s", out)
+		}
+	})
 }
 
 func TestUpdateInvalidVersion_JSON(t *testing.T) {
@@ -503,12 +735,12 @@ func TestUpdateNpmVerifyFail_JSON_NoRestoreHintWhenBackupUnavailable(t *testing.
 	if err == nil {
 		t.Fatal("expected verification failure")
 	}
-	var exitErr *output.ExitError
-	if !errors.As(err, &exitErr) {
-		t.Fatalf("expected *output.ExitError, got %T: %v", err, err)
+	var bareErr *output.BareError
+	if !errors.As(err, &bareErr) {
+		t.Fatalf("expected *output.BareError, got %T: %v", err, err)
 	}
-	if exitErr.Code != output.ExitAPI {
-		t.Fatalf("expected ExitAPI (%d), got %d", output.ExitAPI, exitErr.Code)
+	if bareErr.Code != output.ExitAPI {
+		t.Fatalf("expected ExitAPI (%d), got %d", output.ExitAPI, bareErr.Code)
 	}
 
 	out := stdout.String()
@@ -663,9 +895,9 @@ func TestPermissionHint(t *testing.T) {
 	origOS := currentOS
 	defer func() { currentOS = origOS }()
 
-	// Linux: EACCES should produce a hint with npm prefix guidance.
+	// Linux + npm: EACCES should produce a hint with npm prefix guidance.
 	currentOS = "linux"
-	hint := permissionHint("EACCES: permission denied, access '/usr/local/lib'")
+	hint := permissionHint("EACCES: permission denied, access '/usr/local/lib'", "npm")
 	if !strings.Contains(hint, "npm global prefix") {
 		t.Errorf("expected npm prefix hint on linux, got: %s", hint)
 	}
@@ -673,16 +905,25 @@ func TestPermissionHint(t *testing.T) {
 		t.Errorf("should not suggest raw sudo npm install, got: %s", hint)
 	}
 
+	// Linux + pnpm: EACCES should point at pnpm setup, not npm prefix/sudo.
+	pnpmHint := permissionHint("EACCES: permission denied, access '/Users/x/Library/pnpm'", "pnpm")
+	if !strings.Contains(pnpmHint, "pnpm setup") {
+		t.Errorf("expected pnpm setup hint, got: %s", pnpmHint)
+	}
+	if strings.Contains(pnpmHint, "npm global prefix") || strings.Contains(pnpmHint, "sudo") {
+		t.Errorf("pnpm hint must not reference npm prefix or sudo, got: %s", pnpmHint)
+	}
+
 	// Windows: EACCES hint is suppressed (no EACCES on Windows).
 	currentOS = "windows"
-	hint = permissionHint("EACCES: permission denied")
+	hint = permissionHint("EACCES: permission denied", "npm")
 	if hint != "" {
 		t.Errorf("expected empty hint on Windows, got: %s", hint)
 	}
 
 	// Non-EACCES error: always empty.
 	currentOS = "linux"
-	if got := permissionHint("some other error"); got != "" {
+	if got := permissionHint("some other error", "npm"); got != "" {
 		t.Errorf("expected empty hint for non-EACCES, got: %s", got)
 	}
 }
@@ -946,6 +1187,7 @@ func TestRunSkillsAndState_DedupForceBypass(t *testing.T) {
 	}
 	called := false
 	updater := &selfupdate.Updater{
+		SkillsIndexFetchOverride: successfulSkillsIndexFetch(),
 		SkillsCommandOverride: func(args ...string) *selfupdate.NpmResult {
 			called = true
 			return successfulSkillsCommand()(args...)
@@ -962,7 +1204,10 @@ func TestRunSkillsAndState_DedupForceBypass(t *testing.T) {
 
 func TestRunSkillsAndState_SuccessWritesState(t *testing.T) {
 	t.Setenv("LARKSUITE_CLI_CONFIG_DIR", t.TempDir())
-	updater := &selfupdate.Updater{SkillsCommandOverride: successfulSkillsCommand()}
+	updater := &selfupdate.Updater{
+		SkillsIndexFetchOverride: successfulSkillsIndexFetch(),
+		SkillsCommandOverride:    successfulSkillsCommand(),
+	}
 	got := runSkillsAndState(updater, newTestIO(), "1.0.21", false)
 	if got == nil || got.Err != nil {
 		t.Fatalf("runSkillsAndState() = %+v, want non-nil with nil Err", got)
@@ -982,6 +1227,7 @@ func TestRunSkillsAndState_FailureKeepsOldState(t *testing.T) {
 		t.Fatal(err)
 	}
 	updater := &selfupdate.Updater{
+		SkillsIndexFetchOverride: successfulSkillsIndexFetch(),
 		SkillsCommandOverride: func(args ...string) *selfupdate.NpmResult {
 			r := &selfupdate.NpmResult{}
 			r.Err = fmt.Errorf("npx failed")
@@ -1298,28 +1544,133 @@ func TestEmitSkillsTextHints_Success(t *testing.T) {
 	}
 }
 
-// TestUpdateCommand_RealSkillsSyncRewritesState is a live integration test that
-// verifies "lark-cli update" correctly triggers skills sync and rewrites the
-// state file. It calls the real npx skills CLI, so the test is skipped when
-// npx or the skills registry is unavailable (e.g. no network or fork PRs).
-func TestUpdateCommand_RealSkillsSyncRewritesState(t *testing.T) {
-	// Phase 1: Verify the real npx skills CLI is available; skip otherwise.
-	if _, err := exec.LookPath("npx"); err != nil {
-		t.Skipf("npx not found in PATH: %v", err)
+// liveSkillsIsolationEnv is the single source of truth for the user-state
+// directories a live skills test must redirect under the temporary home. It
+// covers the CLI's own config, the agent homes the skills CLI installs into,
+// the XDG dirs it derives paths from (XDG_STATE_HOME holds its global
+// .skill-lock.json), and the npm/npx overrides that take precedence over
+// HOME-derived defaults (both cases: npm reads npm_config_* case-insensitively).
+func liveSkillsIsolationEnv(home string) map[string]string {
+	return map[string]string{
+		"HOME":                     home,
+		"USERPROFILE":              home,
+		"APPDATA":                  filepath.Join(home, "AppData", "Roaming"),
+		"LOCALAPPDATA":             filepath.Join(home, "AppData", "Local"),
+		"XDG_CONFIG_HOME":          filepath.Join(home, ".config"),
+		"XDG_DATA_HOME":            filepath.Join(home, ".local", "share"),
+		"XDG_STATE_HOME":           filepath.Join(home, ".local", "state"),
+		"CODEX_HOME":               filepath.Join(home, ".codex"),
+		"CLAUDE_CONFIG_DIR":        filepath.Join(home, ".claude"),
+		"LARKSUITE_CLI_CONFIG_DIR": filepath.Join(home, ".lark-cli"),
+		"npm_config_cache":         filepath.Join(home, ".npm-cache"),
+		"NPM_CONFIG_CACHE":         filepath.Join(home, ".npm-cache"),
+		"npm_config_prefix":        filepath.Join(home, ".npm-global"),
+		"NPM_CONFIG_PREFIX":        filepath.Join(home, ".npm-global"),
+		"npm_config_userconfig":    filepath.Join(home, ".npmrc"),
+		"NPM_CONFIG_USERCONFIG":    filepath.Join(home, ".npmrc"),
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+}
+
+func prepareLiveSkillsIntegration(t *testing.T) string {
+	t.Helper()
+	if os.Getenv(runLiveSkillsTestsEnv) != "1" {
+		t.Skipf("live skills integration test disabled; set %s=1 to run", runLiveSkillsTestsEnv)
+	}
+
+	home := t.TempDir()
+	for key, value := range liveSkillsIsolationEnv(home) {
+		t.Setenv(key, value)
+	}
+	return home
+}
+
+func TestPrepareLiveSkillsIntegration(t *testing.T) {
+	reachedAfterGate := false
+	t.Run("requires explicit opt-in", func(t *testing.T) {
+		t.Setenv(runLiveSkillsTestsEnv, "")
+		prepareLiveSkillsIntegration(t)
+		reachedAfterGate = true
+	})
+	if reachedAfterGate {
+		t.Fatal("prepareLiveSkillsIntegration continued without explicit opt-in")
+	}
+
+	t.Run("isolates user directories", func(t *testing.T) {
+		t.Setenv(runLiveSkillsTestsEnv, "1")
+		home := prepareLiveSkillsIntegration(t)
+		// Pin the isolation contract by key: removing a variable from
+		// liveSkillsIsolationEnv must fail this list, and every redirected
+		// value must live under the temporary home.
+		required := []string{
+			"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+			"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+			"CODEX_HOME", "CLAUDE_CONFIG_DIR", "LARKSUITE_CLI_CONFIG_DIR",
+			"npm_config_cache", "NPM_CONFIG_CACHE",
+			"npm_config_prefix", "NPM_CONFIG_PREFIX",
+			"npm_config_userconfig", "NPM_CONFIG_USERCONFIG",
+		}
+		env := liveSkillsIsolationEnv(home)
+		for _, key := range required {
+			expected, ok := env[key]
+			if !ok {
+				t.Errorf("liveSkillsIsolationEnv dropped required key %s", key)
+				continue
+			}
+			if !strings.HasPrefix(expected, home) {
+				t.Errorf("%s = %q escapes temporary home %q", key, expected, home)
+			}
+			if got := os.Getenv(key); got != expected {
+				t.Errorf("%s = %q, want %q", key, got, expected)
+			}
+		}
+	})
+}
+
+// seedLiveSkillsGlobal verifies the real npx skills CLI is reachable, installs
+// lark-calendar into the isolated global skills dir, and returns the parsed
+// global skills list. The caller opted in explicitly, so every missing
+// precondition is a hard failure — skipping would report "nothing verified"
+// as a green run.
+func seedLiveSkillsGlobal(t *testing.T) []string {
+	t.Helper()
+	if _, err := exec.LookPath("npx"); err != nil {
+		t.Fatalf("live skills tests opted in but npx not found in PATH: %v", err)
+	}
+	// Three sequential npx runs against a cold cache (the isolated home starts
+	// empty) can be slow; with Fatal-on-timeout semantics the budget errs on
+	// the generous side.
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	if err := exec.CommandContext(ctx, "npx", "-y", "skills", "add", "https://open.feishu.cn", "--list").Run(); err != nil {
-		t.Skipf("real skills CLI unavailable: %v", err)
+		t.Fatalf("live skills tests opted in but real skills CLI unavailable: %v", err)
+	}
+	if err := exec.CommandContext(ctx, "npx", "-y", "skills", "add", "https://open.feishu.cn", "-s", "lark-calendar", "-g", "-y").Run(); err != nil {
+		t.Fatalf("failed to seed isolated global skills: %v", err)
 	}
 	globalOut, err := exec.CommandContext(ctx, "npx", "-y", "skills", "ls", "-g").Output()
 	if err != nil {
-		t.Skipf("real global skills CLI unavailable: %v", err)
+		t.Fatalf("real global skills CLI unavailable: %v", err)
 	}
 	localSkills := skillscheck.ParseSkillsList(string(globalOut))
-	if err := ctx.Err(); err != nil {
-		t.Skipf("real skills CLI availability check timed out: %v", err)
+	if len(localSkills) == 0 {
+		t.Fatal("seeded lark-calendar but global skills list is empty")
 	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("real skills CLI availability check timed out: %v", err)
+	}
+	return localSkills
+}
+
+// TestUpdateCommand_RealSkillsSyncRewritesState is a live integration test that
+// verifies "lark-cli update" correctly triggers skills sync and rewrites the
+// state file. It calls the real npx skills CLI and only runs with explicit
+// opt-in. All user directories are redirected to a temporary home.
+func TestUpdateCommand_RealSkillsSyncRewritesState(t *testing.T) {
+	prepareLiveSkillsIntegration(t)
+
+	// Phase 1: Verify the real npx skills CLI is available and seed the
+	// isolated global skills install.
+	localSkills := seedLiveSkillsGlobal(t)
 
 	// Phase 2: Seed a previous sync state simulating an upgrade from v1.0.19.
 	// lark-doc and lark-mail are recorded as skipped/deleted, meaning the user
@@ -1415,26 +1766,17 @@ func TestUpdateCommand_RealSkillsSyncRewritesState(t *testing.T) {
 // not exist (cold start), the update command installs all official skills and
 // writes a fresh state file. No skill should appear in SkippedDeletedSkills
 // because there is no previous state to preserve user deletions from.
-// This is a live integration test that calls the real npx skills CLI; it is
-// skipped when npx or the skills registry is unavailable.
+// This is a live integration test that calls the real npx skills CLI and only
+// runs with explicit opt-in. All user directories are redirected to a temporary
+// home.
 func TestUpdateCommand_SkillsSyncColdStart(t *testing.T) {
-	// Phase 1: Verify the real npx skills CLI is available; skip otherwise.
-	if _, err := exec.LookPath("npx"); err != nil {
-		t.Skipf("npx not found in PATH: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	if err := exec.CommandContext(ctx, "npx", "-y", "skills", "add", "https://open.feishu.cn", "--list").Run(); err != nil {
-		t.Skipf("real skills CLI unavailable: %v", err)
-	}
-	globalOut, err := exec.CommandContext(ctx, "npx", "-y", "skills", "ls", "-g").Output()
-	if err != nil {
-		t.Skipf("real global skills CLI unavailable: %v", err)
-	}
-	localSkills := skillscheck.ParseSkillsList(string(globalOut))
-	if err := ctx.Err(); err != nil {
-		t.Skipf("real skills CLI availability check timed out: %v", err)
-	}
+	prepareLiveSkillsIntegration(t)
+
+	// Phase 1: Verify the real npx skills CLI is available and seed one known
+	// official skill into the isolated global install. Cold start means no
+	// skills-state.json — locally installed skills may still exist, and seeding
+	// one keeps the Phase 4 per-skill assertions from running zero times.
+	localSkills := seedLiveSkillsGlobal(t)
 
 	// Phase 2: Use an isolated config dir with no pre-existing skills-state.json.
 	t.Setenv("LARKSUITE_CLI_CONFIG_DIR", t.TempDir())
@@ -1517,4 +1859,65 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func TestResolveSkillsBrand_LayeredFallback(t *testing.T) {
+	// Layer 1: resolved config wins.
+	var errBuf bytes.Buffer
+	f := &cmdutil.Factory{Config: func() (*core.CliConfig, error) {
+		return &core.CliConfig{Brand: core.LarkBrand(" LARK ")}, nil
+	}}
+	if got := resolveSkillsBrand(f, &errBuf); got != core.BrandLark {
+		t.Errorf("resolved-config brand = %q, want lark", got)
+	}
+
+	// Layer 2: credential resolution fails, raw config file still supplies the
+	// brand (a locked keychain must not flip a Lark profile to Feishu).
+	tmp := t.TempDir()
+	t.Setenv("LARKSUITE_CLI_CONFIG_DIR", tmp)
+	raw := `{"apps":[{"appId":"cli_x","appSecret":"test-secret","brand":"lark","users":[]}]}`
+	if err := os.WriteFile(filepath.Join(tmp, "config.json"), []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f = &cmdutil.Factory{Config: func() (*core.CliConfig, error) { return nil, errors.New("keychain locked") }}
+	errBuf.Reset()
+	if got := resolveSkillsBrand(f, &errBuf); got != core.BrandLark {
+		t.Errorf("raw-config brand = %q, want lark", got)
+	}
+	if errBuf.Len() != 0 {
+		t.Errorf("unexpected notice when raw config supplied the brand: %q", errBuf.String())
+	}
+
+	// Layer 3: nothing readable → default brand with a notice.
+	t.Setenv("LARKSUITE_CLI_CONFIG_DIR", t.TempDir())
+	errBuf.Reset()
+	if got := resolveSkillsBrand(f, &errBuf); got != core.BrandFeishu {
+		t.Errorf("fallback brand = %q, want feishu", got)
+	}
+	if !strings.Contains(errBuf.String(), "could not resolve the configured brand") {
+		t.Errorf("expected fallback notice, got %q", errBuf.String())
+	}
+}
+
+// The raw-config fallback must read the active profile, not the default one.
+func TestResolveSkillsBrand_RespectsActiveProfile(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("LARKSUITE_CLI_CONFIG_DIR", tmp)
+	raw := `{"currentApp":"feishu-app","apps":[` +
+		`{"name":"feishu-app","appId":"cli_f","appSecret":"test-secret","brand":"feishu","users":[]},` +
+		`{"name":"lark-prof","appId":"cli_l","appSecret":"test-secret","brand":"lark","users":[]}]}`
+	if err := os.WriteFile(filepath.Join(tmp, "config.json"), []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f := &cmdutil.Factory{
+		Invocation: cmdutil.InvocationContext{Profile: "lark-prof"},
+		Config:     func() (*core.CliConfig, error) { return nil, errors.New("keychain locked") },
+	}
+	var errBuf bytes.Buffer
+	if got := resolveSkillsBrand(f, &errBuf); got != core.BrandLark {
+		t.Errorf("brand = %q, want lark (the active profile's brand)", got)
+	}
+	if errBuf.Len() != 0 {
+		t.Errorf("unexpected notice: %q", errBuf.String())
+	}
 }

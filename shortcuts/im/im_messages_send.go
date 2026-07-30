@@ -32,12 +32,12 @@ var ImMessagesSend = common.Shortcut{
 		{Name: "content", Desc: "(one of --content/--text/--markdown/--image/--file/--video/--audio required) message content JSON"},
 		{Name: "text", Desc: "plain text message (auto-wrapped as JSON)"},
 		{Name: "markdown", Desc: "markdown text (auto-wrapped as post format with style optimization; image URLs auto-resolved)"},
-		{Name: "idempotency-key", Desc: "idempotency key (prevents duplicate sends)"},
+		{Name: "idempotency-key", Desc: "idempotency key, max 50 characters (prevents duplicate sends)"},
 		{Name: "image", Desc: "image key (img_xxx), URL, or cwd-relative local path (absolute paths and .. are rejected)"},
 		{Name: "file", Desc: "file key (file_xxx), URL, or cwd-relative local path (absolute paths and .. are rejected)"},
 		{Name: "video", Desc: "video file key (file_xxx), URL, or cwd-relative local path (absolute paths and .. are rejected); must be used together with --video-cover"},
 		{Name: "video-cover", Desc: "video cover image key (img_xxx), URL, or cwd-relative local path (absolute paths and .. are rejected); required when using --video"},
-		{Name: "audio", Desc: "audio file key (file_xxx), URL, or cwd-relative local path (absolute paths and .. are rejected)"},
+		{Name: "audio", Desc: audioMessageInputDesc},
 	},
 	DryRun: func(ctx context.Context, runtime *common.RuntimeContext) *common.DryRunAPI {
 		chatFlag := runtime.Str("chat-id")
@@ -97,6 +97,7 @@ var ImMessagesSend = common.Shortcut{
 		content := runtime.Str("content")
 		text := runtime.Str("text")
 		markdown := runtime.Str("markdown")
+		idempotencyKey := runtime.Str("idempotency-key")
 		imageKey := runtime.Str("image")
 		fileKey := runtime.Str("file")
 		videoKey := runtime.Str("video")
@@ -111,6 +112,9 @@ var ImMessagesSend = common.Shortcut{
 			if err := validateMediaFlagPath(fio, mf.flag, mf.val); err != nil {
 				return err
 			}
+		}
+		if err := validateAudioMessageInput("--audio", audioKey); err != nil {
+			return err
 		}
 
 		if err := common.ExactlyOneTyped(runtime, "chat-id", "user-id"); err != nil {
@@ -131,6 +135,9 @@ var ImMessagesSend = common.Shortcut{
 
 		if msg := validateContentFlags(text, markdown, content, imageKey, fileKey, videoKey, videoCoverKey, audioKey); msg != "" {
 			return errs.NewValidationError(errs.SubtypeInvalidArgument, msg)
+		}
+		if err := validateIdempotencyKey(idempotencyKey); err != nil {
+			return err
 		}
 		if content != "" && !json.Valid([]byte(content)) {
 			return errs.NewValidationError(errs.SubtypeInvalidArgument, "--content is not valid JSON: %s\nexample: --content '{\"text\":\"hello\"}' or --text 'hello'", content).WithParam("--content")
@@ -206,6 +213,15 @@ var ImMessagesSend = common.Shortcut{
 		}, nil)
 		return nil
 	},
+}
+
+const maxIdempotencyKeyChars = 50
+
+func validateIdempotencyKey(value string) error {
+	if chars := len([]rune(value)); chars > maxIdempotencyKeyChars {
+		return errs.NewValidationError(errs.SubtypeInvalidArgument, "--idempotency-key exceeds the maximum of %d characters (got %d)", maxIdempotencyKeyChars, chars).WithParam("--idempotency-key")
+	}
+	return nil
 }
 
 // isMediaKey returns true if the value looks like an existing API key rather than a local file path.

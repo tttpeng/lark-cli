@@ -12,9 +12,11 @@ func Shortcuts() []common.Shortcut {
 		MinutesDownload,
 		MinutesUpload,
 		MinutesUpdate,
+		MinutesApplyPermission,
 		MinutesSummary,
 		MinutesTodo,
 		MinutesSpeakerReplace,
 		MinutesWordReplace,
+		MinutesDetail,
 	}
 }

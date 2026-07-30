@@ -1,10 +1,9 @@
 // Copyright (c) 2026 Lark Technologies Pte. Ltd.
 // SPDX-License-Identifier: MIT
 
-// Command lintcheck runs the source-level errs/ contract guards (all four checks).
-// The fifth contract rule (business path must use typed errors) lives in
-// .golangci.yml as a forbidigo entry; the four checks here are AST-level
-// guards that golangci-lint cannot express.
+// Command lintcheck runs repository source-contract guards that golangci-lint
+// cannot express directly. It currently covers typed-error contracts and the
+// resolver-owned endpoint contract.
 //
 // lintcheck lives in its own Go module under lint/ so its build-time
 // dependency on golang.org/x/tools/go/packages does not leak into the
@@ -30,6 +29,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/larksuite/cli/lint/domaincontract"
 	"github.com/larksuite/cli/lint/errscontract"
 	"github.com/larksuite/cli/lint/lintapi"
 )
@@ -38,20 +38,27 @@ import (
 // as sibling packages under lint/ (see README.md) and are added below.
 type scanner struct {
 	name string
-	fn   func(root string) ([]lintapi.Violation, error)
+	fn   func(root string, opts errscontract.ScanOptions) ([]lintapi.Violation, error)
 }
 
 var scanners = []scanner{
-	{name: "errscontract", fn: errscontract.ScanRepo},
+	{name: "errscontract", fn: errscontract.ScanRepoWithOptions},
+	{name: "domaincontract", fn: func(root string, _ errscontract.ScanOptions) ([]lintapi.Violation, error) {
+		return domaincontract.ScanRepo(root)
+	}},
 }
 
 func main() {
+	var changedFrom string
+	var printLegacyCommandErrorCandidates bool
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr,
 			"Usage: lintcheck [repo-root]\n"+
 				"Runs every registered lint domain against repo-root (default: current directory).\n")
 		flag.PrintDefaults()
 	}
+	flag.StringVar(&changedFrom, "changed-from", "", "base revision for incremental boundary-error checks")
+	flag.BoolVar(&printLegacyCommandErrorCandidates, "print-legacy-command-error-candidates", false, "print existing command boundary bare errors as allowlist candidates")
 	flag.Parse()
 
 	root := "."
@@ -62,10 +69,22 @@ func main() {
 			root = "."
 		}
 	}
+	if printLegacyCommandErrorCandidates {
+		lines, err := errscontract.LegacyCommandErrorCandidatesForRepo(root)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "lintcheck errscontract: %v\n", err)
+			os.Exit(2)
+		}
+		for _, line := range lines {
+			fmt.Fprintln(os.Stdout, line)
+		}
+		return
+	}
 
+	opts := errscontract.ScanOptions{ChangedFrom: changedFrom}
 	var all []lintapi.Violation
 	for _, s := range scanners {
-		violations, err := s.fn(root)
+		violations, err := s.fn(root, opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "lintcheck %s: %v\n", s.name, err)
 			os.Exit(2)

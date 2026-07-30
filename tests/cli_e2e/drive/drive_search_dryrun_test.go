@@ -11,7 +11,6 @@ import (
 
 	clie2e "github.com/larksuite/cli/tests/cli_e2e"
 	"github.com/stretchr/testify/require"
-	"github.com/tidwall/gjson"
 )
 
 // TestDriveSearchDryRun_RequestShape locks in the dry-run request body so
@@ -129,39 +128,78 @@ func TestDriveSearchDryRun_RequestShape(t *testing.T) {
 			result.AssertExitCode(t, 0)
 
 			out := result.Stdout
-			if got := gjson.Get(out, "api.0.method").String(); got != "POST" {
+			if got := clie2e.DryRunGet(out, "api.0.method").String(); got != "POST" {
 				t.Fatalf("method=%q, want POST\nstdout:\n%s", got, out)
 			}
-			if got := gjson.Get(out, "api.0.url").String(); got != tt.wantURL {
+			if got := clie2e.DryRunGet(out, "api.0.url").String(); got != tt.wantURL {
 				t.Fatalf("url=%q, want %q\nstdout:\n%s", got, tt.wantURL, out)
 			}
-			if got := gjson.Get(out, "api.0.body.query").String(); got != tt.wantQuery {
+			if got := clie2e.DryRunGet(out, "api.0.body.query").String(); got != tt.wantQuery {
 				t.Fatalf("body.query=%q, want %q\nstdout:\n%s", got, tt.wantQuery, out)
 			}
-			if tt.wantDocFilter && !gjson.Get(out, "api.0.body.doc_filter").Exists() {
+			if tt.wantDocFilter && !clie2e.DryRunGet(out, "api.0.body.doc_filter").Exists() {
 				t.Fatalf("doc_filter missing\nstdout:\n%s", out)
 			}
-			if !tt.wantDocFilter && gjson.Get(out, "api.0.body.doc_filter").Exists() {
+			if !tt.wantDocFilter && clie2e.DryRunGet(out, "api.0.body.doc_filter").Exists() {
 				t.Fatalf("doc_filter should be omitted\nstdout:\n%s", out)
 			}
-			if tt.wantWikiFilter && !gjson.Get(out, "api.0.body.wiki_filter").Exists() {
+			if tt.wantWikiFilter && !clie2e.DryRunGet(out, "api.0.body.wiki_filter").Exists() {
 				t.Fatalf("wiki_filter missing\nstdout:\n%s", out)
 			}
-			if !tt.wantWikiFilter && gjson.Get(out, "api.0.body.wiki_filter").Exists() {
+			if !tt.wantWikiFilter && clie2e.DryRunGet(out, "api.0.body.wiki_filter").Exists() {
 				t.Fatalf("wiki_filter should be omitted\nstdout:\n%s", out)
 			}
 			for path, want := range tt.wantDocFilterFields {
-				if got := gjson.Get(out, "api.0.body.doc_filter."+path).String(); got != want {
+				if got := clie2e.DryRunGet(out, "api.0.body.doc_filter."+path).String(); got != want {
 					t.Fatalf("doc_filter.%s=%q, want %q\nstdout:\n%s", path, got, want, out)
 				}
 			}
 			for path, want := range tt.wantWikiFilterFields {
-				if got := gjson.Get(out, "api.0.body.wiki_filter."+path).String(); got != want {
+				if got := clie2e.DryRunGet(out, "api.0.body.wiki_filter."+path).String(); got != want {
 					t.Fatalf("wiki_filter.%s=%q, want %q\nstdout:\n%s", path, got, want, out)
 				}
 			}
 		})
 	}
+}
+
+func TestDriveSearchDryRun_BotIdentity(t *testing.T) {
+	setDriveSearchE2EEnv(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+
+	result, err := clie2e.RunCmd(ctx, clie2e.Request{
+		Args: []string{
+			"drive", "+search",
+			"--query", "season report",
+			"--page-size", "5",
+			"--dry-run",
+		},
+		DefaultAs: "bot",
+	})
+	require.NoError(t, err)
+	result.AssertExitCode(t, 0)
+	require.Contains(t, result.Args, "--as")
+	require.Contains(t, result.Args, "bot")
+
+	out := result.Stdout
+	if got := clie2e.DryRunGet(out, "api.0.method").String(); got != "POST" {
+		t.Fatalf("method=%q, want POST\nstdout:\n%s\nstderr:\n%s", got, out, result.Stderr)
+	}
+	if got := clie2e.DryRunGet(out, "api.0.url").String(); got != "/open-apis/search/v2/doc_wiki/search" {
+		t.Fatalf("url=%q, want Search v2 doc_wiki/search\nstdout:\n%s\nstderr:\n%s", got, out, result.Stderr)
+	}
+	if got := clie2e.DryRunGet(out, "api.0.body.query").String(); got != "season report" {
+		t.Fatalf("body.query=%q, want season report\nstdout:\n%s", got, out)
+	}
+
+	helpResult, err := clie2e.RunCmd(ctx, clie2e.Request{
+		Args: []string{"drive", "+search", "--help"},
+	})
+	require.NoError(t, err)
+	helpResult.AssertExitCode(t, 0)
+	require.Contains(t, helpResult.Stdout, "identity type: user | bot")
 }
 
 // TestDriveSearchDryRun_OpenedClamping locks in the agent-facing slice
@@ -220,8 +258,8 @@ func TestDriveSearchDryRun_OpenedClamping(t *testing.T) {
 	// And the request body's open_time must reflect the clamped window
 	// (start and end both present, span = 90 days exactly).
 	body := result.Stdout
-	start := gjson.Get(body, "api.0.body.doc_filter.open_time.start").Int()
-	end := gjson.Get(body, "api.0.body.doc_filter.open_time.end").Int()
+	start := clie2e.DryRunGet(body, "api.0.body.doc_filter.open_time.start").Int()
+	end := clie2e.DryRunGet(body, "api.0.body.doc_filter.open_time.end").Int()
 	if start == 0 || end == 0 {
 		t.Fatalf("doc_filter.open_time.start/end missing\nstdout:\n%s", body)
 	}
@@ -257,10 +295,10 @@ func TestDriveSearchDryRun_RejectsOpenedOver1Year(t *testing.T) {
 	require.NoError(t, err)
 	result.AssertExitCode(t, 0)
 
-	if api := gjson.Get(result.Stdout, "api"); api.IsArray() && len(api.Array()) > 0 {
+	if api := clie2e.DryRunGet(result.Stdout, "api"); api.IsArray() && len(api.Array()) > 0 {
 		t.Fatalf("dry-run api list must be empty when validation fails\nstdout:\n%s", result.Stdout)
 	}
-	errMsg := gjson.Get(result.Stdout, "error").String()
+	errMsg := clie2e.DryRunGet(result.Stdout, "error").String()
 	if !strings.Contains(errMsg, "365-day") {
 		t.Fatalf("expected 365-day cap message in dry-run error, got %q\nstdout:\n%s", errMsg, result.Stdout)
 	}
@@ -320,10 +358,10 @@ func TestDriveSearchDryRun_RejectsBadDocType(t *testing.T) {
 	require.NoError(t, err)
 	result.AssertExitCode(t, 0)
 
-	if api := gjson.Get(result.Stdout, "api"); api.IsArray() && len(api.Array()) > 0 {
+	if api := clie2e.DryRunGet(result.Stdout, "api"); api.IsArray() && len(api.Array()) > 0 {
 		t.Fatalf("dry-run api list must be empty when validation fails\nstdout:\n%s", result.Stdout)
 	}
-	errMsg := gjson.Get(result.Stdout, "error").String()
+	errMsg := clie2e.DryRunGet(result.Stdout, "error").String()
 	if !strings.Contains(errMsg, "--doc-types") {
 		t.Fatalf("expected --doc-types error in dry-run, got %q\nstdout:\n%s", errMsg, result.Stdout)
 	}

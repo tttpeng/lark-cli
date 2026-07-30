@@ -13,7 +13,6 @@ import (
 
 	clie2e "github.com/larksuite/cli/tests/cli_e2e"
 	"github.com/stretchr/testify/require"
-	"github.com/tidwall/gjson"
 )
 
 // TestDrive_PushDryRun locks in the request shape the +push shortcut emits
@@ -52,16 +51,16 @@ func TestDrive_PushDryRun(t *testing.T) {
 	result.AssertExitCode(t, 0)
 
 	out := result.Stdout
-	if got := gjson.Get(out, "api.0.method").String(); got != "GET" {
+	if got := clie2e.DryRunGet(out, "api.0.method").String(); got != "GET" {
 		t.Fatalf("method = %q, want GET\nstdout:\n%s", got, out)
 	}
-	if got := gjson.Get(out, "api.0.url").String(); got != "/open-apis/drive/v1/files" {
+	if got := clie2e.DryRunGet(out, "api.0.url").String(); got != "/open-apis/drive/v1/files" {
 		t.Fatalf("url = %q, want /open-apis/drive/v1/files\nstdout:\n%s", got, out)
 	}
-	if got := gjson.Get(out, "folder_token").String(); got != "fldcnE2E001" {
+	if got := clie2e.DryRunGet(out, "folder_token").String(); got != "fldcnE2E001" {
 		t.Fatalf("folder_token = %q, want fldcnE2E001\nstdout:\n%s", got, out)
 	}
-	desc := gjson.Get(out, "description").String()
+	desc := clie2e.DryRunGet(out, "description").String()
 	if !strings.Contains(desc, "list --folder-token") {
 		t.Fatalf("description missing list phrase, got %q\nstdout:\n%s", desc, out)
 	}
@@ -187,10 +186,10 @@ func TestDrive_PushDryRunAcceptsDeleteRemoteWithYes(t *testing.T) {
 	result.AssertExitCode(t, 0)
 
 	out := result.Stdout
-	if got := gjson.Get(out, "api.0.method").String(); got != "GET" {
+	if got := clie2e.DryRunGet(out, "api.0.method").String(); got != "GET" {
 		t.Fatalf("method = %q, want GET\nstdout:\n%s", got, out)
 	}
-	if got := gjson.Get(out, "folder_token").String(); got != "fldcnE2E001" {
+	if got := clie2e.DryRunGet(out, "folder_token").String(); got != "fldcnE2E001" {
 		t.Fatalf("folder_token = %q, want fldcnE2E001\nstdout:\n%s", got, out)
 	}
 	// No structured error envelope on stdout/stderr — the conditional
@@ -226,15 +225,11 @@ func TestDrive_PushDryRunRejectsMissingFolderToken(t *testing.T) {
 		DefaultAs: "user",
 	})
 	require.NoError(t, err)
-	// This is a cobra-level required-flag check that fires BEFORE our
-	// Validate callback, so the exit code is cobra's generic flag-error
-	// (1) — distinct from ExitValidation (2). Asserting the exact code
-	// pins which layer rejected the run, which matters because a
-	// regression that pushed required-flag validation into our own
-	// Validate (changing the exit class to 2) would silently slip
-	// through a loose `!= 0` check.
-	if result.ExitCode != 1 {
-		t.Fatalf("missing --folder-token must be rejected with exit=1 (cobra required-flag), got exit=%d\nstdout:\n%s\nstderr:\n%s", result.ExitCode, result.Stdout, result.Stderr)
+	// A missing cobra required-flag is routed through the typed validation
+	// envelope (exit 2, invalid_argument) — the same class as the explicit
+	// flag/subcommand guards, not cobra's plain-text exit 1.
+	if result.ExitCode != 2 {
+		t.Fatalf("missing --folder-token must be rejected with exit=2 (typed validation), got exit=%d\nstdout:\n%s\nstderr:\n%s", result.ExitCode, result.Stdout, result.Stderr)
 	}
 	combined := result.Stdout + "\n" + result.Stderr
 	if !strings.Contains(combined, "folder-token") {
@@ -273,10 +268,10 @@ func TestDrive_PushDryRunAcceptsDuplicateRemoteStrategies(t *testing.T) {
 			result.AssertExitCode(t, 0)
 
 			out := result.Stdout
-			if got := gjson.Get(out, "api.0.method").String(); got != "GET" {
+			if got := clie2e.DryRunGet(out, "api.0.method").String(); got != "GET" {
 				t.Fatalf("method = %q, want GET\nstdout:\n%s", got, out)
 			}
-			if got := gjson.Get(out, "folder_token").String(); got != "fldcnE2E001" {
+			if got := clie2e.DryRunGet(out, "folder_token").String(); got != "fldcnE2E001" {
 				t.Fatalf("folder_token = %q, want fldcnE2E001\nstdout:\n%s", got, out)
 			}
 		})
@@ -312,10 +307,10 @@ func TestDrive_PushDryRunAcceptsIfExistsSmart(t *testing.T) {
 	result.AssertExitCode(t, 0)
 
 	out := result.Stdout
-	if got := gjson.Get(out, "api.0.method").String(); got != "GET" {
+	if got := clie2e.DryRunGet(out, "api.0.method").String(); got != "GET" {
 		t.Fatalf("method = %q, want GET\nstdout:\n%s", got, out)
 	}
-	if got := gjson.Get(out, "folder_token").String(); got != "fldcnE2E001" {
+	if got := clie2e.DryRunGet(out, "folder_token").String(); got != "fldcnE2E001" {
 		t.Fatalf("folder_token = %q, want fldcnE2E001\nstdout:\n%s", got, out)
 	}
 }

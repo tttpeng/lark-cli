@@ -17,6 +17,7 @@ import (
 
 // TestSheets_FilterWorkflow tests the spreadsheet sheet filter operations
 func TestSheets_FilterWorkflow(t *testing.T) {
+	clie2e.SkipWithoutTenantAccessToken(t)
 	parentT := t
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
@@ -97,7 +98,7 @@ func TestSheets_FilterWorkflow(t *testing.T) {
 		})
 		require.NoError(t, err)
 		result.AssertExitCode(t, 0)
-		result.AssertStdoutStatus(t, 0)
+		result.AssertStdoutStatus(t, true)
 	})
 
 	t.Run("get filter with spreadsheet.sheet.filters get as bot", func(t *testing.T) {
@@ -114,7 +115,7 @@ func TestSheets_FilterWorkflow(t *testing.T) {
 		})
 		require.NoError(t, err)
 		result.AssertExitCode(t, 0)
-		result.AssertStdoutStatus(t, 0)
+		result.AssertStdoutStatus(t, true)
 
 		filterInfo := gjson.Get(result.Stdout, "data.sheet_filter_info")
 		require.True(t, filterInfo.Exists(), "filter info should exist, stdout: %s", result.Stdout)
@@ -144,7 +145,7 @@ func TestSheets_FilterWorkflow(t *testing.T) {
 		})
 		require.NoError(t, err)
 		result.AssertExitCode(t, 0)
-		result.AssertStdoutStatus(t, 0)
+		result.AssertStdoutStatus(t, true)
 	})
 
 	t.Run("delete filter with spreadsheet.sheet.filters delete as bot", func(t *testing.T) {
@@ -162,6 +163,6 @@ func TestSheets_FilterWorkflow(t *testing.T) {
 		})
 		require.NoError(t, err)
 		result.AssertExitCode(t, 0)
-		result.AssertStdoutStatus(t, 0)
+		result.AssertStdoutStatus(t, true)
 	})
 }

@@ -74,6 +74,7 @@ func TestOKR_ProgressCreateDryRun(t *testing.T) {
 		Args: []string{
 			"okr", "+progress-create",
 			"--content", `{"blocks":[{"type":"text","text":"test progress"}]}`,
+			"--style", "richtext",
 			"--target-id", "123456789",
 			"--target-type", "objective",
 			"--dry-run",
@@ -86,6 +87,10 @@ func TestOKR_ProgressCreateDryRun(t *testing.T) {
 	assert.True(t, strings.Contains(output, "/open-apis/okr/v1/progress_records/"), "dry-run should contain API path, got: %s", output)
 	assert.True(t, strings.Contains(output, "POST"), "dry-run should contain POST method, got: %s", output)
 	assert.True(t, strings.Contains(output, "123456789"), "dry-run should contain target-id, got: %s", output)
+	// Validate request body contains expected fields
+	assert.True(t, strings.Contains(output, `"target_id"`), "dry-run should contain target_id in request body, got: %s", output)
+	assert.True(t, strings.Contains(output, `"target_type"`), "dry-run should contain target_type in request body, got: %s", output)
+	assert.True(t, strings.Contains(output, `"content"`), "dry-run should contain content in request body, got: %s", output)
 }
 
 // TestOKR_ProgressCreateDryRun_WithProgress validates +progress-create dry-run with progress rate.
@@ -98,6 +103,7 @@ func TestOKR_ProgressCreateDryRun_WithProgress(t *testing.T) {
 		Args: []string{
 			"okr", "+progress-create",
 			"--content", `{"blocks":[{"type":"text","text":"test progress"}]}`,
+			"--style", "richtext",
 			"--target-id", "123456789",
 			"--target-type", "key_result",
 			"--progress-percent", "75",
@@ -156,6 +162,48 @@ func TestOKR_ProgressGetDryRun_WithUserIDType(t *testing.T) {
 	assert.True(t, strings.Contains(output, "/open-apis/okr/v1/progress_records/987654321"), "dry-run should contain API path, got: %s", output)
 }
 
+// TestOKR_ProgressGetDryRun_SimpleStyle validates +progress-get dry-run with --style simple.
+func TestOKR_ProgressGetDryRun_SimpleStyle(t *testing.T) {
+	setDryRunConfigEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+
+	result, err := clie2e.RunCmd(ctx, clie2e.Request{
+		Args: []string{
+			"okr", "+progress-get",
+			"--progress-id", "123456789",
+			"--style", "simple",
+			"--dry-run",
+		},
+	})
+	require.NoError(t, err)
+	result.AssertExitCode(t, 0)
+
+	output := result.Stdout
+	assert.True(t, strings.Contains(output, "/open-apis/okr/v1/progress_records/123456789"), "dry-run should contain API path, got: %s", output)
+}
+
+// TestOKR_ProgressGetDryRun_RichTextStyle validates +progress-get dry-run with --style richtext.
+func TestOKR_ProgressGetDryRun_RichTextStyle(t *testing.T) {
+	setDryRunConfigEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+
+	result, err := clie2e.RunCmd(ctx, clie2e.Request{
+		Args: []string{
+			"okr", "+progress-get",
+			"--progress-id", "987654321",
+			"--style", "richtext",
+			"--dry-run",
+		},
+	})
+	require.NoError(t, err)
+	result.AssertExitCode(t, 0)
+
+	output := result.Stdout
+	assert.True(t, strings.Contains(output, "/open-apis/okr/v1/progress_records/987654321"), "dry-run should contain API path, got: %s", output)
+}
+
 // --- Progress Update Dry-run E2E tests ---
 
 // TestOKR_ProgressUpdateDryRun validates +progress-update dry-run output contains the correct method and API path.
@@ -169,6 +217,7 @@ func TestOKR_ProgressUpdateDryRun(t *testing.T) {
 			"okr", "+progress-update",
 			"--progress-id", "123456789",
 			"--content", `{"blocks":[{"type":"text","text":"updated progress"}]}`,
+			"--style", "richtext",
 			"--dry-run",
 		},
 	})
@@ -191,6 +240,7 @@ func TestOKR_ProgressUpdateDryRun_WithProgress(t *testing.T) {
 			"okr", "+progress-update",
 			"--progress-id", "123456789",
 			"--content", `{"blocks":[{"type":"text","text":"updated progress"}]}`,
+			"--style", "richtext",
 			"--progress-percent", "100",
 			"--progress-status", "done",
 			"--dry-run",
@@ -248,6 +298,8 @@ func TestOKR_ProgressListDryRun_Objective(t *testing.T) {
 	output := result.Stdout
 	assert.True(t, strings.Contains(output, "/open-apis/okr/v2/objectives/123456789/progresses"), "dry-run should contain objective API path, got: %s", output)
 	assert.True(t, strings.Contains(output, "GET"), "dry-run should contain GET method, got: %s", output)
+	assert.Equal(t, int64(100), clie2e.DryRunGet(output, "api.0.params.page_size").Int(), "dry-run should contain default page_size=100, got: %s", output)
+	assert.False(t, clie2e.DryRunGet(output, "api.0.params.page_token").Exists(), "empty page_token should be omitted, got: %s", output)
 }
 
 // TestOKR_ProgressListDryRun_KeyResult validates +progress-list dry-run for key_result.
@@ -270,4 +322,28 @@ func TestOKR_ProgressListDryRun_KeyResult(t *testing.T) {
 	output := result.Stdout
 	assert.True(t, strings.Contains(output, "/open-apis/okr/v2/key_results/987654321/progresses"), "dry-run should contain key_result API path, got: %s", output)
 	assert.True(t, strings.Contains(output, "GET"), "dry-run should contain GET method, got: %s", output)
+}
+
+// TestOKR_ProgressListDryRun_WithPagination validates +progress-list dry-run with explicit pagination.
+func TestOKR_ProgressListDryRun_WithPagination(t *testing.T) {
+	setDryRunConfigEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+
+	result, err := clie2e.RunCmd(ctx, clie2e.Request{
+		Args: []string{
+			"okr", "+progress-list",
+			"--target-id", "123456789",
+			"--target-type", "objective",
+			"--page-size", "25",
+			"--page-token", "next_page",
+			"--dry-run",
+		},
+	})
+	require.NoError(t, err)
+	result.AssertExitCode(t, 0)
+
+	output := result.Stdout
+	assert.Equal(t, int64(25), clie2e.DryRunGet(output, "api.0.params.page_size").Int(), "dry-run should contain page_size=25, got: %s", output)
+	assert.Equal(t, "next_page", clie2e.DryRunGet(output, "api.0.params.page_token").String(), "dry-run should contain page_token, got: %s", output)
 }

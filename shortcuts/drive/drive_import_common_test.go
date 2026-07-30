@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -93,61 +94,61 @@ func TestValidateDriveImportFileSize(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		filePath string
+		ext      string
 		docType  string
 		fileSize int64
 		wantText string
 	}{
 		{
 			name:     "docx exceeds 600mb limit",
-			filePath: "./report.docx",
+			ext:      "docx",
 			docType:  "docx",
 			fileSize: driveImport600MBFileSizeLimit + 1,
 			wantText: "exceeds 600.0 MB import limit for .docx",
 		},
 		{
 			name:     "csv sheet exceeds 20mb limit",
-			filePath: "./data.csv",
+			ext:      "csv",
 			docType:  "sheet",
 			fileSize: driveImport20MBFileSizeLimit + 1,
 			wantText: "exceeds 20.0 MB import limit for .csv when importing as sheet",
 		},
 		{
 			name:     "csv bitable exceeds 100mb limit",
-			filePath: "./data.csv",
+			ext:      "csv",
 			docType:  "bitable",
 			fileSize: driveImport100MBFileSizeLimit + 1,
 			wantText: "exceeds 100.0 MB import limit for .csv when importing as bitable",
 		},
 		{
 			name:     "xlsx within 800mb limit",
-			filePath: "./data.xlsx",
+			ext:      "xlsx",
 			docType:  "sheet",
 			fileSize: driveImport800MBFileSizeLimit,
 		},
 		{
 			name:     "pptx exceeds 500mb limit",
-			filePath: "./deck.pptx",
+			ext:      "pptx",
 			docType:  "slides",
 			fileSize: driveImport500MBFileSizeLimit + 1,
 			wantText: "exceeds 500.0 MB import limit for .pptx",
 		},
 		{
 			name:     "pptx within 500mb limit",
-			filePath: "./deck.pptx",
+			ext:      "pptx",
 			docType:  "slides",
 			fileSize: driveImport500MBFileSizeLimit,
 		},
 		{
 			name:     "base exceeds 20mb limit",
-			filePath: "./snapshot.base",
+			ext:      "base",
 			docType:  "bitable",
 			fileSize: driveImport20MBFileSizeLimit + 1,
 			wantText: "exceeds 20.0 MB import limit for .base",
 		},
 		{
 			name:     "base within 20mb limit",
-			filePath: "./snapshot.base",
+			ext:      "base",
 			docType:  "bitable",
 			fileSize: driveImport20MBFileSizeLimit,
 		},
@@ -157,7 +158,7 @@ func TestValidateDriveImportFileSize(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := validateDriveImportFileSize(tt.filePath, tt.docType, tt.fileSize)
+			err := validateDriveImportFileSize(tt.ext, tt.docType, tt.fileSize)
 			if tt.wantText == "" {
 				if err != nil {
 					t.Fatalf("expected no error, got %v", err)
@@ -208,6 +209,82 @@ func TestDriveImportStatusPendingWithoutToken(t *testing.T) {
 	}
 	if got := status.StatusLabel(); got != "pending" {
 		t.Fatalf("StatusLabel() = %q, want %q", got, "pending")
+	}
+}
+
+func TestDriveImportFailureErrorAddsConcurrentOperationGuidance(t *testing.T) {
+	t.Parallel()
+
+	for _, code := range driveImportConcurrentOperationCodes {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			t.Parallel()
+
+			err := driveImportFailureError(driveImportStatus{
+				JobStatus:   3,
+				JobErrorMsg: "call CreateObjNode return error code, code: " + strconv.Itoa(code) + ", message:",
+			})
+			problem, ok := errs.ProblemOf(err)
+			if !ok {
+				t.Fatalf("expected typed error, got %T", err)
+			}
+			if problem.Category != errs.CategoryAPI {
+				t.Fatalf("category = %q, want %q", problem.Category, errs.CategoryAPI)
+			}
+			if problem.Subtype != errs.SubtypeServerError {
+				t.Fatalf("subtype = %q, want %q", problem.Subtype, errs.SubtypeServerError)
+			}
+			if problem.Code != code {
+				t.Fatalf("code = %d, want %d", problem.Code, code)
+			}
+			if !problem.Retryable {
+				t.Fatal("expected retryable error")
+			}
+			if problem.Hint != driveImportConcurrentOperationHint {
+				t.Fatalf("hint = %q, want %q", problem.Hint, driveImportConcurrentOperationHint)
+			}
+		})
+	}
+}
+
+func TestDriveImportFailureErrorLeavesOtherFailuresUnchanged(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		msg  string
+	}{
+		{
+			name: "ordinary failure",
+			msg:  "unsupported conversion",
+		},
+		{
+			name: "longer numeric code containing known code",
+			msg:  "call CreateObjNode return error code, code: 12321401012, message:",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := driveImportFailureError(driveImportStatus{
+				JobStatus:   3,
+				JobErrorMsg: tt.msg,
+			})
+			problem, ok := errs.ProblemOf(err)
+			if !ok {
+				t.Fatalf("expected typed error, got %T", err)
+			}
+			if problem.Code != 0 {
+				t.Fatalf("code = %d, want 0", problem.Code)
+			}
+			if problem.Retryable {
+				t.Fatal("expected non-concurrency failure to remain non-retryable")
+			}
+			if problem.Hint != "" {
+				t.Fatalf("hint = %q, want empty", problem.Hint)
+			}
+		})
 	}
 }
 
